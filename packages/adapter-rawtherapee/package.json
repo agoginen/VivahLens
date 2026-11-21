@@ -9,5 +9,8 @@
   },
   "dependencies": {
     "@vivahlens/core": "*"
+  },
+  "devDependencies": {
+    "@vivahlens/testkit": "*"
   }
 }

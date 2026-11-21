@@ -3,15 +3,11 @@ import path from "node:path";
 import jpeg from "jpeg-js";
 import { VivahError, type AssetRef, type GrayImage, type Preview } from "@vivahlens/core";
 import { extractEmbeddedJpeg } from "./embeddedJpeg.js";
+import { readExif, type ExifInfo } from "./exif.js";
+import { applyOrientation, readOrientation, type Rgba } from "./orientation.js";
 
 export const RAW_EXTENSIONS = [".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".dng", ".rw2"] as const;
 export const IMAGE_EXTENSIONS = [...RAW_EXTENSIONS, ".jpg", ".jpeg"] as const;
-
-interface Rgba {
-  width: number;
-  height: number;
-  data: Uint8Array;
-}
 
 /** Photo assets in a folder (non-recursive), sorted by name for a stable job order. */
 export async function scanFolder(dir: string): Promise<AssetRef[]> {
@@ -22,17 +18,27 @@ export async function scanFolder(dir: string): Promise<AssetRef[]> {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-async function decodePreview(file: string): Promise<Rgba> {
+function decodeEmbedded(embedded: Uint8Array, name: string): Rgba {
+  try {
+    // Orientation is read from the preview's own EXIF; RAW containers that keep it only in the outer
+    // TIFF header still arrive unrotated (that value is exposed through `readExif` instead).
+    const img = jpeg.decode(embedded, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024 });
+    return applyOrientation({ width: img.width, height: img.height, data: img.data }, readOrientation(embedded));
+  } catch (err) {
+    throw new VivahError("ASSET_UNREADABLE", `Cannot decode preview of ${name}: ${(err as Error).message}`);
+  }
+}
+
+async function readAsset(file: string): Promise<{ bytes: Uint8Array; embedded: Uint8Array }> {
   const bytes = await fs.readFile(file);
   const embedded = extractEmbeddedJpeg(bytes);
   if (!embedded) throw new VivahError("ASSET_UNREADABLE", `No embedded JPEG preview found in ${path.basename(file)}`);
-  try {
-    // EXIF orientation is not applied yet; previews of rotated frames are sent as stored.
-    const img = jpeg.decode(embedded, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024 });
-    return { width: img.width, height: img.height, data: img.data };
-  } catch (err) {
-    throw new VivahError("ASSET_UNREADABLE", `Cannot decode preview of ${path.basename(file)}: ${(err as Error).message}`);
-  }
+  return { bytes, embedded };
+}
+
+async function decodePreview(file: string): Promise<Rgba> {
+  const { embedded } = await readAsset(file);
+  return decodeEmbedded(embedded, path.basename(file));
 }
 
 /** Box-filter downscale so the long edge is at most `maxEdge`; never upscales. */
@@ -83,4 +89,40 @@ export async function loadGray(asset: AssetRef, opts: { maxEdge?: number } = {})
     gray[i] = Math.round(0.299 * small.data[i * 4]! + 0.587 * small.data[i * 4 + 1]! + 0.114 * small.data[i * 4 + 2]!);
   }
   return { width: small.width, height: small.height, data: gray };
+}
+
+export interface SceneStats {
+  /** Mean luminance, 0–255. */
+  meanLuma: number;
+  /** Rough colour temperature from the red/blue balance; good enough to group scenes, not to set white balance. */
+  tempK: number;
+}
+
+export interface Analysis {
+  gray: GrayImage;
+  scene: SceneStats;
+  exif: ExifInfo;
+}
+
+/** One decode that yields everything the pipeline needs before any LLM call: culling image, scene signature, EXIF. */
+export async function loadAnalysis(asset: AssetRef, opts: { maxEdge?: number } = {}): Promise<Analysis> {
+  const { bytes, embedded } = await readAsset(asset.path);
+  const small = downscale(decodeEmbedded(embedded, path.basename(asset.path)), opts.maxEdge ?? 512);
+  const gray = new Uint8Array(small.width * small.height);
+  let r = 0;
+  let b = 0;
+  for (let i = 0; i < gray.length; i++) {
+    const [pr, pg, pb] = [small.data[i * 4]!, small.data[i * 4 + 1]!, small.data[i * 4 + 2]!];
+    gray[i] = Math.round(0.299 * pr + 0.587 * pg + 0.114 * pb);
+    r += pr;
+    b += pb;
+  }
+  const meanLuma = gray.reduce((s, v) => s + v, 0) / Math.max(1, gray.length);
+  const ratio = Math.max(r, 1) / Math.max(b, 1);
+  const tempK = Math.min(12000, Math.max(2000, 6500 * Math.pow(1 / ratio, 1.4)));
+  return {
+    gray: { width: small.width, height: small.height, data: gray },
+    scene: { meanLuma, tempK },
+    exif: readExif(bytes, embedded),
+  };
 }

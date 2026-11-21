@@ -3,12 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "schema": "node scripts/emit-schema.mjs",
+    "licenses": "node scripts/check-licenses.mjs",
+    "ci": "npm run build && npm test && npm run licenses"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

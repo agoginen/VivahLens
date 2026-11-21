@@ -680,33 +680,81 @@ Colour matching uses LUT/CDL extraction (§2b). Music licensing is the photograp
 
 ---
 
-## Implementation Status *(updated 2026-11-22, 2nd pass)*
+## Implementation Status *(updated 2026-11-22, 4th pass)*
 
-TypeScript monorepo (`npm run build`, `npm test`; Node ≥ 22.5 for `node:sqlite`). **38 tests, all passing.** Implemented and tested:
+TypeScript monorepo (`npm run ci` = build + tests + licence gate; **Node ≥ 22.13**, where `node:sqlite` no longer needs a flag). **122 tests: 120 pass, 2 skipped by design** (export contract for adapters that only write edits). Implemented and tested:
 
 | Plan section | Where | State |
 |---|---|---|
-| §7.3 Edit Recipe schema | `packages/core/src/recipe` | Done (zod; rejects out-of-range values) |
+| §7.3 Edit Recipe schema | `packages/core/src/recipe`, `packages/core/schema` | Done (zod; rejects out-of-range values). **New:** language-neutral JSON Schema (draft-07, via `zod-to-json-schema`) committed and kept fresh by a test + CI step (`npm run schema`) for the Lua/UXP plugins |
 | §2.2 Adapter interface | `packages/core/src/adapters` | Done (`detect`, `applyRecipe`, `export`) |
-| §2.4 LLM gateway, providers, pricing, spend cap | `packages/core/src/llm` | Done: OpenAI-compatible (OpenAI/Ollama/LM Studio/Gemini endpoint) + Anthropic; schema repair ×2; backoff; cost ledger. Per-provider structured-output conformance test still open |
-| §2b Style engine, scene clusters, outliers, override learning | `packages/core/src/style` | Done (LLM calls use injected gateway) |
+| §2.4 LLM gateway, providers, pricing, spend cap | `packages/core/src/llm` | Done: OpenAI-compatible (OpenAI/Ollama/LM Studio) + Anthropic; schema repair ×2; backoff; cost ledger. **New (CLI):** Gemini preset that refuses to run until the user confirms a paid-tier project, and per-provider data-handling notices taken from the verified research. Per-provider structured-output conformance test still open |
+| §2b Style engine, scene clusters, outliers, override learning | `packages/core/src/style` | Done; `diffOverrides` turns reviewer slider changes into profile updates. **New: exact style learning from the photographer's own XMP edits** (`parseCrsToRecipe`, `profileFromRecipes` = per-setting medians, no LLM) |
 | §2b Culling (blur, near-duplicate) | `packages/core/src/culling` | Done on grayscale buffers. Missing: closed-eye/face detection |
-| §2b/§7b Ingest: embedded-preview extraction, 2048px preview, 512px gray, folder scan | `packages/ingest` | Done (pure-TS JPEG-marker walker finds the largest preview inside CR2/CR3/NEF/ARW/RAF/ORF/DNG/RW2; `jpeg-js` BSD-3 decodes). Previews are re-encoded, so EXIF/GPS is stripped. **Not yet verified on real camera files.** EXIF orientation not applied; files with no embedded JPEG (some DNG/lossless-only) fail with `ASSET_UNREADABLE`; LibRaw fallback still open |
-| §2.5/§2.8/§7g Job pipeline, resumability, review gate | `packages/core/src/pipeline` | Done (memory + SQLite stores; export only approved items; `exportApproved` needs no LLM deps) |
-| §7d Signed entitlements, offline grace | `packages/core/src/licensing` | Done (ed25519); server issuance/billing not built |
-| Adobe XMP sidecar adapter | `packages/adapter-xmp` | Done |
+| §2b/§7b Ingest | `packages/ingest` | Done: pure-TS embedded-JPEG finder for CR2/CR3/NEF/ARW/RAF/ORF/DNG/RW2, 2048px preview, 512px gray, EXIF orientation from the preview's APP1. **New:** EXIF reader (camera, lens, ISO, aperture, shutter, focal length, capture time, orientation; TIFF-based RAW and JPEG, bounds-checked, never throws), sampled SHA-256 file fingerprint (not xxHash), one-pass analysis (gray + scene stats + EXIF). Previews are re-encoded, so EXIF/GPS is stripped. **Not yet verified on real camera files**; CR3/RAF EXIF falls back to the embedded preview's; files with no embedded JPEG fail with `ASSET_UNREADABLE` (LibRaw fallback open); no HEIC |
+| §2.5/§2.8/§7g Job pipeline, resumability, review gate | `packages/core/src/pipeline` | Done. **New:** identify stage (fingerprint, duplicate-file rejection, "already processed in job X"), **scene grouping wired in** (scene-aware LLM prompts), **album outlier flags wired in** (flagged, never rewritten), audit trail, reviewer overrides recorded, `jobStats` acceptance metric. Approval ends in `exported` or `approved` (edit-only adapters such as XMP) |
+| §7b Data model | `packages/core/src/pipeline/sqliteStore.ts` | **New.** Versioned forward-only migrations (`PRAGMA user_version`; legacy DBs upgrade in place; newer DBs are refused); tables `job`, `job_item`, `asset`, `override`, `style_profile` (immutable versions), `audit_event`. `MemoryStore` implements the same `Store` interface. Cloud (Postgres) schema not built |
+| §7.5 Evaluation | `packages/core/src/eval` | **New.** `compareRecipes` / `evaluateRecipes`: tolerance-based acceptance rate, schema-valid rate, per-field error; `vivah eval` scores the LLM against the photographer's real XMP edits (skips sidecars written by VivahLens). Golden-dataset management and perceptual-similarity scoring (LPIPS-style) not built |
+| §7.5 Adapter contract tests | `packages/testkit` | **New.** Shared suite every adapter must pass (identity/capabilities, detect, apply, empty and unsupported-field recipes, repeatability, media-kind refusal, export); used by the XMP, RawTherapee and Lightroom adapters |
+| §4 Review UI | `packages/review` | Local web UI: grid, per-photo sliders mapped to recipe fields, approve, submit; overrides re-applied, recorded and fed back into the style profile. **New:** badges for "differs from the album" and "already processed in job X". Colour preview is a CSS approximation until adapters can render. Server: 127.0.0.1 only, one-time token, Host check against DNS rebinding, JSON-only writes, 1 MB body cap, CSP. Plain HTML/JS, so the Tauri shell can embed it unchanged |
+| §7c Lightroom Classic IPC + adapter | `packages/lightroom` | **New (agent side).** Authenticated loopback protocol (token hello, newline-delimited JSON, request ids, timeouts, single plugin slot, handshake file in user profile) and `LightroomClassicAdapter` sending numeric develop settings. Tested against a fake plugin client. **The Lua plugin is not written**: it needs the login-gated SDK, and setting names, `applyDevelopSettings` and `catalog:addPhoto` remain UNVERIFIED (Phase 0 spike) |
+| §7d Signed entitlements, offline grace | `packages/core/src/licensing`, `packages/cli/src/license.ts` | Done (ed25519). **New:** the CLI verifies the token and the plan's adapters before `edit`/`review`/`export` when `VIVAH_LICENSE_PUBLIC_KEY` is set; with no key configured it is a development build and nothing is enforced (a shipped build must embed the key). Server issuance/billing not built |
+| Adobe XMP sidecar adapter | `packages/adapter-xmp` | Done. **New:** sidecars it writes are marked `vivah:Generated` so learning/evaluation can tell them from the photographer's own edits |
 | RawTherapee adapter | `packages/adapter-rawtherapee` | Done against a fake runner; PP3 keys beyond `Compensation`/denoising are **unverified** on a real install |
-| Agent CLI (`vivah learn / edit / export`) | `packages/cli` | Done: end-to-end folder workflow with providers `mock`, `openai`, `anthropic`, `ollama`, `openai-compatible`; keys from env; stops at the review gate; resumes from `~/.vivahlens/jobs.db`. Interim stand-in for the desktop UI |
+| Agent CLI | `packages/cli` | `learn` (`--refs` or `--from-xmp`), `edit`, `review`, `export`, **`stats`**, **`eval`**; adapters `xmp`, `rawtherapee`, `lightroom`; providers `mock`, `openai`, `anthropic`, `gemini`, `ollama`, `openai-compatible`. **New:** live progress with ETA, graceful Ctrl-C (progress is saved; rerun resumes), results on stdout and chatter on stderr (`--json` stays machine-readable), pre-run cost estimate from `--prices` (refuses above `--max-cost`) |
+| Repo hygiene §7j, §7k | `.github/workflows/ci.yml`, `scripts/`, `NOTICE`, `README.md` | **New.** CI matrix (Windows/macOS/Linux × Node 22/24: build, tests, licence gate, schema freshness) **written but not yet run on GitHub**; runtime-dependency licence gate (permissive allow-list) that also generates `NOTICE`; README. No licence file chosen yet |
 
-**Run it:** `npm run build`, then `node packages/cli/dist/main.js learn --refs <finished-photos> --name Warm --provider mock` and `... edit --folder <raws> --profile warm.profile.json --provider mock`. Use `--provider openai --model <id>` with `OPENAI_API_KEY` for a real model. The `mock` provider is offline and sends nothing.
+**Run it:** see [README.md](README.md). In short: `npm install && npm run build`, then
+`node packages/cli/dist/main.js learn --from-xmp <folder-with-your-xmp-edits> --name Mine`,
+`... edit --folder <raws> --profile mine.profile.json --provider openai --model <id> --prices prices.json`,
+`... review --folder <raws> --profile mine.profile.json`,
+`... eval --folder <raws-with-your-xmp> --profile mine.profile.json --provider openai --model <id>` (the Phase 0 acceptance test),
+`... stats --folder <raws>`. The `mock` provider is offline and sends nothing. Price-table format: `{"effectiveFrom":"2026-01-01","models":{"<model>":{"inputPerMTok":1,"outputPerMTok":4}}}`. If `npm install` times out behind a corporate proxy, set `HTTPS_PROXY` for that command.
 
-**Not yet built:** Tauri desktop app/UI (§2.7), cloud API/billing/galleries (§7c–§7e), Lightroom Lua and Premiere UXP plugins, darktable adapter, Resolve/FCP/Capture One adapters, video pipeline (§7f), LibRaw fallback + EXIF orientation, signing/updater (§3), OS-keychain key storage (keys are env-only today), i18n/accessibility (§7i), cost estimate shown before a run (price table exists in core but the CLI has none configured). Phase 0 spikes remain the gate for several of these.
+### Gap analysis vs. this plan *(re-verified 2026-11-22, 4th pass)*
 
-**Suggested next steps:** (1) run `vivah` on a real RAW set with a real model and measure the Phase 0 acceptance rate; (2) Tauri shell around the CLI's `runJob`/`exportApproved` with the review grid; (3) Lightroom Classic Lua plugin + loopback IPC once the SDK is downloaded; (4) darktable adapter.
+Legend: ✅ done · ❌ not started · 🔌 built but not wired in · ◐ simplified vs. the plan · ⏸ blocked on external input
+
+| Area (plan §) | Item | Status |
+|---|---|---|
+| Desktop §2.7, §4 | Tauri shell, onboarding flow, always-on background agent | ❌ (no Rust toolchain on the dev machine; the review UI is embeddable) |
+| Cloud §2.1, §7c–§7e | API, auth, billing/MoR, entitlement-issuing server, style-profile sync, galleries/delivery links, object storage, cloud render workers | ❌ |
+| Editors §1, Ph. 2–4 | Lightroom Lua plugin, Premiere UXP plugin, darktable, Resolve, Final Cut Pro, Capture One adapters | ❌ (Lightroom agent side exists; the plugin needs the login-gated SDK ⏸) |
+| Video §7f | Proxy, analysis, highlight selection, beat sync, timeline apply | ❌ |
+| Style §2b | XMP before/after diff ingester (`learn --from-xmp`) | ✅ sidecars only; Lightroom catalogs (`.lrcat`) are not read |
+| Style §2b | Embedding nearest-neighbour; LUT extraction | ❌ |
+| Quality §7.5 | LLM eval harness (`vivah eval`); shared adapter contract tests; cross-OS CI workflow | ✅ (CI written, not yet run on GitHub) |
+| Quality §2b, §7.5 | Golden dataset management + perceptual-similarity scoring | ❌ |
+| Culling §2b | Closed-eye detection, face clustering / best-of-burst | ❌ (needs a model choice) |
+| Ingest §7b | EXIF metadata, content fingerprint + duplicate-file detection | ✅ (sampled SHA-256, not xxHash; unverified on real camera files) |
+| Ingest §7b | HEIC, RAW decode fallback for files without an embedded JPEG | ❌ |
+| Style §2.5, §2b | Scene clustering and album outlier detection | ✅ wired into the pipeline, CLI summary and review UI |
+| Licensing §7d | Entitlement verification | ✅ enforced by the CLI when a public key is configured (development builds skip it) |
+| UX §4 | Live progress + ETA; graceful cancel | ✅ |
+| Security §3, §7k | NOTICE + licence scan | ✅ |
+| Security §3, §7k | OS keychain (keys are env-only), signing/notarization, auto-updater, low-privilege decode, fuzzing harness | ❌ (the EXIF reader is tested against truncated/hostile input, but there is no fuzzing) |
+| Release §7.6 | Audit log | ✅ metadata-only `audit_event` table |
+| Release §7j, §7.6, §7i | Installers, diagnostics bundle, telemetry opt-in, i18n, accessibility, SLO benchmarks | ❌ |
+| Product §5, §7e | Tier pricing/billing, bundled-credits tier, teams/roles, client proofing, export presets (watermark, IPTC), SFTP, notifications | ❌ |
+| Adapter §2.2 | `importAssets`, progress stream, `cancel` on the interface | ◐ (cancel only via `AbortSignal` in the pipeline) |
+| LLM §2.4 | Provider capabilities/remote price config, native Azure, schema-enforced output, Batch mode | ◐ (JSON mode only; local price file). Gemini preset with a mandatory paid-tier confirmation and per-provider data notices are done ✅ |
+| Jobs §2.8 | `style-matched`, `applying`, `delivered` states | ◐ (an `approved` state was added for edit-only adapters) |
+| Data §7b | `asset`, `style_profile`, `override`, `audit_event` tables, migrations | ✅ local SQLite (v2 schema). Cloud (Postgres) schema ❌ |
+| Recipe §7.3 | Exported JSON Schema | ✅ draft-07, kept fresh by test + CI. Codegen for other languages ❌; tone curve, crop, LUT and video fields still have no adapter translation ◐ |
+| Privacy §3 | "What leaves your device" indicator; full-resolution opt-in | ◐ (CLI lines and provider notices only; no UI indicator, no full-resolution option) |
+| Review §4 | Outlier / earlier-job flags | ✅ |
+| Review §4 | True before/after render; keyboard shortcuts | ◐ (CSS approximation) |
+| Phase 0 | Real-RAW/real-LLM acceptance test, SDK download, Resolve free-edition test, EULAs, legal reviews, signing entity/MoR decisions, photographer interviews | ⏸ |
+
+**Still not built (summary):** Tauri desktop shell, cloud/billing, Lightroom Lua and Premiere UXP plugins, darktable/Resolve/FCP/Capture One adapters, video pipeline, signing/updater, keychain, installers, i18n/accessibility, closed-eye/face culling, real-render before/after, golden-dataset management, HEIC and RAW-decode fallback. Phase 0 spikes remain the gate for several of these.
+
+**Suggested next steps:** (1) run `vivah learn --from-xmp` and `vivah eval` on a real shoot with a real model and measure the Phase 0 acceptance rate (the tooling for this now exists); (2) push and confirm the CI matrix passes on GitHub; (3) download the Lightroom SDK, write the Lua plugin against the protocol in `packages/lightroom/src/ipc.ts`, and verify develop-setting names and throughput; (4) Tauri shell embedding the review UI with the Rust-side keychain; (5) darktable adapter once its XMP/style path is verified.
 
 ---
 
 ## Change Log
+- **2026-11-22 (impl 4)**: XMP diff ingester + `learn --from-xmp`; EXIF reader, file fingerprint and duplicate-file detection; versioned SQLite migrations with `asset`/`override`/`style_profile`/`audit_event` tables (`Store` = `JobStore` + `LibraryStore`); scene grouping and album outlier flags wired into the pipeline, CLI and review UI; `jobStats`, `compareRecipes`/`evaluateRecipes`, `vivah stats` and `vivah eval`; live progress/ETA, Ctrl-C resume, stdout/stderr split, provider data notices, Gemini paid-tier gate, CLI license enforcement; `@vivahlens/testkit` adapter contract suite; EditRecipe JSON Schema artifact; CI workflow, licence gate + `NOTICE`, README. Fixed: `SqliteStore` leaked its connection when refusing a too-new database; `engines` corrected to Node ≥ 22.13.
+- **2026-11-22 (impl 3)**: Added `@vivahlens/review` (local review UI + server), `@vivahlens/adapter-lightroom` (loopback IPC + adapter), EXIF orientation in ingest, CLI `review`/`lightroom`/cost estimate; `approved` item state and optional export spec for edit-only adapters.
 - **2026-11-22 (impl 2)**: Added `@vivahlens/ingest` (RAW/JPEG preview + grayscale extraction) and `@vivahlens/cli` (end-to-end agent workflow); narrowed `exportApproved` to `StageDeps`; updated Implementation Status.
 - **2026-11-22 (impl 1)**: Core engine, XMP and RawTherapee adapters implemented (see Implementation Status).
 - **2026-11-22 (v2)**: Verified the plan against primary sources ([editor research](docs/research/editor-integration-verification.md), [platform/market research](docs/research/platform-and-market-verification.md)); corrected §1 table (LrC IPC, Adobe cloud EOL, Resolve/Capture One/FCP/Premiere details, GPL policy), §2.1/§2.4/§2.7 (direct desktop→provider image path, extended LLM interface, costs), §2b (culling libraries), §3 (processor package, signing, credentials), §5 (flat competitor pricing, MoR), §6 (new Phase 0 spikes, local-first MVP, deliverable-based phases), and added §7b–§7k (data model, IPC/API, accounts/licensing/billing, delivery, video pipeline, error handling, SLOs, accessibility/i18n, release/launch gate, threat model/licensing).

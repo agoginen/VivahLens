@@ -9,10 +9,12 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
   },
   "dependencies": {
+    "@vivahlens/adapter-lightroom": "*",
     "@vivahlens/adapter-rawtherapee": "*",
     "@vivahlens/adapter-xmp": "*",
     "@vivahlens/core": "*",
-    "@vivahlens/ingest": "*"
+    "@vivahlens/ingest": "*",
+    "@vivahlens/review": "*"
   },
   "devDependencies": {
     "jpeg-js": "^0.4.4"

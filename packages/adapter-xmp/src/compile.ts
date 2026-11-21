@@ -73,6 +73,14 @@ const escapeAttr = (v: string) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;
 const attrs = (settings: Record<string, string>) =>
   Object.entries(settings).map(([k, v]) => `crs:${k}="${escapeAttr(v)}"`);
 
+/** Marks a sidecar as written by VivahLens, so tools that learn from or score "the photographer's own edits" can skip it. */
+export const VIVAH_NS = "urn:vivahlens:xmp:1.0";
+const GENERATED_ATTR = `vivah:Generated="True"`;
+
+export function isGeneratedByVivah(xmp: string): boolean {
+  return /\bvivah:Generated="True"/.test(xmp);
+}
+
 export function buildXmp(settings: Record<string, string>): string {
   const body = attrs(settings)
     .map((a) => `   ${a}`)
@@ -81,6 +89,8 @@ export function buildXmp(settings: Record<string, string>): string {
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
    xmlns:crs="${NS}"
+   xmlns:vivah="${VIVAH_NS}"
+   ${GENERATED_ATTR}
 ${body}/>
  </rdf:RDF>
 </x:xmpmeta>
@@ -93,6 +103,8 @@ export function mergeXmp(existing: string, settings: Record<string, string>): st
   if (!open) throw new Error("Existing XMP has no rdf:Description element");
   let tag = open[0];
   if (!/xmlns:crs=/.test(tag)) tag = tag.replace(/(\/?)>$/, ` xmlns:crs="${NS}"$1>`);
+  if (!/xmlns:vivah=/.test(tag)) tag = tag.replace(/(\/?)>$/, ` xmlns:vivah="${VIVAH_NS}"$1>`);
+  if (!/vivah:Generated=/.test(tag)) tag = tag.replace(/(\/?)>$/, ` ${GENERATED_ATTR}$1>`);
   for (const [key, value] of Object.entries(settings)) {
     const attr = `crs:${key}="${escapeAttr(value)}"`;
     const re = new RegExp(`crs:${key}="[^"]*"`);

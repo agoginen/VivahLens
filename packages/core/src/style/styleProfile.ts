@@ -56,6 +56,17 @@ export interface Override {
   value: number;
 }
 
+/** The scalar changes a reviewer made between the proposed and the final recipe. */
+export function diffOverrides(original: RecipeAdjustments, final: RecipeAdjustments): Override[] {
+  const out: Override[] = [];
+  for (const path of SCALAR_PATHS) {
+    const was = readScalar(original, path);
+    const now = readScalar(final, path);
+    if (now !== undefined && now !== was) out.push({ path, value: now });
+  }
+  return out;
+}
+
 /**
  * Nudges the profile toward the photographer's corrections (weighted average, not fine-tuning).
  * Returns a new profile with a bumped version; the input is not modified.

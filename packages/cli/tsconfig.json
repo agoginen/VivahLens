@@ -7,6 +7,8 @@
     { "path": "../core" },
     { "path": "../ingest" },
     { "path": "../adapter-xmp" },
-    { "path": "../adapter-rawtherapee" }
+    { "path": "../adapter-rawtherapee" },
+    { "path": "../lightroom" },
+    { "path": "../review" }
   ]
 }

@@ -1,0 +1,2 @@
+# Keep line endings identical on every platform so generated files (NOTICE, JSON Schema) and scripts compare cleanly in CI.
+* text=auto eol=lf

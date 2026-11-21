@@ -5,6 +5,9 @@
     { "path": "packages/adapter-xmp" },
     { "path": "packages/adapter-rawtherapee" },
     { "path": "packages/ingest" },
+    { "path": "packages/review" },
+    { "path": "packages/lightroom" },
+    { "path": "packages/testkit" },
     { "path": "packages/cli" }
   ]
 }

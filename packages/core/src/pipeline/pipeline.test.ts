@@ -9,9 +9,9 @@ import { LlmGateway } from "../llm/gateway.js";
 import type { LlmProvider } from "../llm/types.js";
 import type { EditRecipe } from "../recipe/editRecipe.js";
 import type { StyleProfile } from "../style/styleProfile.js";
-import { MemoryJobStore } from "./jobStore.js";
+import { MemoryStore } from "./libraryStore.js";
 import { exportApproved, runJob, type PipelineDeps } from "./runJob.js";
-import { SqliteJobStore } from "./sqliteJobStore.js";
+import { SqliteStore } from "./sqliteStore.js";
 
 const profile: StyleProfile = { id: "warm", name: "Warm", version: 1, summary: "warm and airy", baseAdjustments: { exposure: 0.3 } };
 
@@ -65,7 +65,7 @@ const flat: GrayImage = { width: 64, height: 64, data: new Uint8Array(64 * 64).f
 
 function deps(over: Partial<PipelineDeps> & Pick<PipelineDeps, "gateway" | "adapter">): PipelineDeps {
   return {
-    store: new MemoryJobStore(),
+    store: new MemoryStore(),
     profile,
     previewOf: async (a) => ({ mediaType: "image/jpeg", dataBase64: a.id }),
     ...over,
@@ -114,12 +114,12 @@ describe("runJob", () => {
     const { adapter } = fakeAdapter();
     const input = { id: "j3", name: "x", assets: [asset("a"), asset("b")] };
 
-    const store1 = new SqliteJobStore(file);
+    const store1 = new SqliteStore(file);
     await runJob(deps({ gateway: llm.gateway, adapter, store: store1 }), input);
     store1.close();
     expect(llm.calls).toHaveLength(2);
 
-    const store2 = new SqliteJobStore(file);
+    const store2 = new SqliteStore(file);
     const again = await runJob(deps({ gateway: llm.gateway, adapter, store: store2 }), input);
     store2.close();
     expect(again.awaitingReview.sort()).toEqual(["a", "b"]);

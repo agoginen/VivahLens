@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { EditRecipe } from "@vivahlens/core";
-import { buildXmp, compileToCrsSettings, mergeXmp } from "./compile.js";
+import { buildXmp, isGeneratedByVivah, compileToCrsSettings, mergeXmp } from "./compile.js";
 import { XmpSidecarAdapter } from "./xmpSidecarAdapter.js";
 
 const recipe: EditRecipe = {
@@ -72,6 +72,13 @@ describe("XmpSidecarAdapter", () => {
     await expect(new XmpSidecarAdapter().applyRecipe({ id: "v", kind: "video", path: "x.mov" }, recipe)).rejects.toMatchObject({
       code: "ADAPTER_APPLY_FAILED",
     });
+  });
+
+  it("builds sidecars that are marked as written by VivahLens, and merging marks existing ones too", () => {
+    expect(isGeneratedByVivah(buildXmp({ Version: "15.0" }))).toBe(true);
+    const photographers = `<rdf:Description xmlns:crs="x" crs:HasSettings="True" crs:Exposure2012="+1.00"/>`;
+    expect(isGeneratedByVivah(photographers)).toBe(false);
+    expect(isGeneratedByVivah(mergeXmp(photographers, { Exposure2012: "+0.50" }))).toBe(true);
   });
 
   it("buildXmp output is well-formed enough to merge", () => {

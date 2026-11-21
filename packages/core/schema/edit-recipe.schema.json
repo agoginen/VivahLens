@@ -1,0 +1,350 @@
+{
+  "$ref": "#/definitions/EditRecipe",
+  "definitions": {
+    "EditRecipe": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.0"
+        },
+        "assetType": {
+          "type": "string",
+          "enum": [
+            "photo",
+            "video"
+          ]
+        },
+        "sourceStyleProfileId": {
+          "type": "string"
+        },
+        "adjustments": {
+          "type": "object",
+          "properties": {
+            "exposure": {
+              "type": "number",
+              "minimum": -5,
+              "maximum": 5
+            },
+            "contrast": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "whiteBalance": {
+              "type": "object",
+              "properties": {
+                "tempK": {
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 50000
+                },
+                "tint": {
+                  "type": "number",
+                  "minimum": -150,
+                  "maximum": 150
+                }
+              },
+              "additionalProperties": false
+            },
+            "highlights": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "shadows": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "whites": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "blacks": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "vibrance": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "saturation": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "toneCurve": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "output": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                },
+                "required": [
+                  "input",
+                  "output"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "hsl": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "hue": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 100
+                  },
+                  "saturation": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 100
+                  },
+                  "luminance": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 100
+                  }
+                },
+                "additionalProperties": false
+              },
+              "propertyNames": {
+                "enum": [
+                  "red",
+                  "orange",
+                  "yellow",
+                  "green",
+                  "aqua",
+                  "blue",
+                  "purple",
+                  "magenta"
+                ]
+              }
+            },
+            "splitToning": {
+              "type": "object",
+              "properties": {
+                "highlightHue": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 360
+                },
+                "highlightSaturation": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "shadowHue": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 360
+                },
+                "shadowSaturation": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "balance": {
+                  "type": "number",
+                  "minimum": -100,
+                  "maximum": 100
+                }
+              },
+              "additionalProperties": false
+            },
+            "crop": {
+              "type": "object",
+              "properties": {
+                "aspectRatio": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "width": {
+                  "type": "number"
+                },
+                "height": {
+                  "type": "number"
+                },
+                "rotationDeg": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            },
+            "noiseReduction": {
+              "type": "object",
+              "properties": {
+                "luminance": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "color": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "additionalProperties": false
+            },
+            "sharpening": {
+              "type": "object",
+              "properties": {
+                "amount": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 150
+                },
+                "radius": {
+                  "type": "number",
+                  "minimum": 0.5,
+                  "maximum": 3
+                }
+              },
+              "additionalProperties": false
+            },
+            "lutRef": {
+              "type": "string"
+            },
+            "videoEdits": {
+              "type": "object",
+              "properties": {
+                "cuts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "clipId": {
+                        "type": "string"
+                      },
+                      "inSec": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "outSec": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "transitionIn": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "cut",
+                          "crossfade",
+                          "dip-to-black"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "clipId",
+                      "inSec",
+                      "outSec"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "colorGrade": {
+                  "type": "string"
+                },
+                "cdl": {
+                  "type": "object",
+                  "properties": {
+                    "slope": {
+                      "type": "array",
+                      "minItems": 3,
+                      "maxItems": 3,
+                      "items": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "offset": {
+                      "type": "array",
+                      "minItems": 3,
+                      "maxItems": 3,
+                      "items": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "power": {
+                      "type": "array",
+                      "minItems": 3,
+                      "maxItems": 3,
+                      "items": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "saturation": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "assetType",
+        "adjustments"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

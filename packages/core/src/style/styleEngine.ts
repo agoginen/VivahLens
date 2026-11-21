@@ -42,18 +42,29 @@ export async function learnStyle(
 
 const ProposedRecipeSchema = EditRecipeSchema.pick({ adjustments: true, confidence: true, notes: true });
 
+export interface SceneContext {
+  /** 1-based scene group of this photo and how many groups the album has. */
+  index: number;
+  total: number;
+  meanLuma: number;
+  tempK: number;
+}
+
 /** One vision call per photo: propose a recipe that applies the profile to this specific frame. */
 export async function proposeRecipe(
   gateway: LlmGateway,
-  args: { preview: Preview; profile: StyleProfile },
+  args: { preview: Preview; profile: StyleProfile; scene?: SceneContext },
 ): Promise<EditRecipe> {
+  const sceneLine = args.scene
+    ? `\nScene context: lighting group ${args.scene.index} of ${args.scene.total} (mean brightness ${Math.round(args.scene.meanLuma)}/255, estimated ${Math.round(args.scene.tempK)}K). Photos in the same group share lighting, so keep their exposure and white-balance corrections consistent.`
+    : "";
   const proposed = await gateway.completeJson(
     "vision",
     {
       messages: [
         {
           role: "system",
-          content: `You adapt a photographer's style to one photo. Start from the style's base adjustments and correct for this frame's exposure and white balance.\n${RECIPE_RULES}\nStyle summary: ${args.profile.summary}\nBase adjustments: ${JSON.stringify(args.profile.baseAdjustments)}\nReply with JSON: {"adjustments": {...}, "confidence": 0..1, "notes": string}.`,
+          content: `You adapt a photographer's style to one photo. Start from the style's base adjustments and correct for this frame's exposure and white balance.\n${RECIPE_RULES}\nStyle summary: ${args.profile.summary}\nBase adjustments: ${JSON.stringify(args.profile.baseAdjustments)}${sceneLine}\nReply with JSON: {"adjustments": {...}, "confidence": 0..1, "notes": string}.`,
         },
         { role: "user", content: [{ type: "text", text: "Photo to edit:" }, ...images([args.preview])] },
       ],
