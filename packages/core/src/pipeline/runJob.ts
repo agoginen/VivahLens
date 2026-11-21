@@ -23,6 +23,9 @@ export interface PipelineDeps {
   onProgress?(event: { stage: ItemState; done: number; total: number }): void;
 }
 
+/** What stages that don't call the LLM need; keeps export usable without a gateway or profile. */
+export type StageDeps = Pick<PipelineDeps, "store" | "adapter" | "concurrency" | "signal" | "onProgress">;
+
 export interface JobInput {
   id: string;
   name: string;
@@ -102,7 +105,7 @@ export interface ExportSummary {
 
 /** Exports only items that are in review AND explicitly approved: nothing client-facing ships unreviewed. */
 export async function exportApproved(
-  deps: PipelineDeps,
+  deps: StageDeps,
   jobId: string,
   assets: readonly AssetRef[],
   decision: ReviewDecision,
@@ -159,7 +162,7 @@ async function cullStage(deps: PipelineDeps, assets: Map<string, AssetRef>, queu
 
 /** Runs fn over items with bounded concurrency; failures are recorded per item and never thrown. */
 async function forEachItem(
-  deps: PipelineDeps,
+  deps: StageDeps,
   stage: ItemState,
   items: JobItem[],
   fn: (item: JobItem, asset: AssetRef) => Promise<void>,

@@ -680,9 +680,9 @@ Colour matching uses LUT/CDL extraction (§2b). Music licensing is the photograp
 
 ---
 
-## Implementation Status *(2026-11-22)*
+## Implementation Status *(updated 2026-11-22, 2nd pass)*
 
-TypeScript monorepo (`npm run build`, `npm test`; Node ≥ 22.5 for `node:sqlite`). Implemented and tested:
+TypeScript monorepo (`npm run build`, `npm test`; Node ≥ 22.5 for `node:sqlite`). **38 tests, all passing.** Implemented and tested:
 
 | Plan section | Where | State |
 |---|---|---|
@@ -690,15 +690,23 @@ TypeScript monorepo (`npm run build`, `npm test`; Node ≥ 22.5 for `node:sqlite
 | §2.2 Adapter interface | `packages/core/src/adapters` | Done (`detect`, `applyRecipe`, `export`) |
 | §2.4 LLM gateway, providers, pricing, spend cap | `packages/core/src/llm` | Done: OpenAI-compatible (OpenAI/Ollama/LM Studio/Gemini endpoint) + Anthropic; schema repair ×2; backoff; cost ledger. Per-provider structured-output conformance test still open |
 | §2b Style engine, scene clusters, outliers, override learning | `packages/core/src/style` | Done (LLM calls use injected gateway) |
-| §2b Culling (blur, near-duplicate) | `packages/core/src/culling` | Done on grayscale buffers. Missing: RAW decode, closed-eye/face detection |
-| §2.5/§2.8/§7g Job pipeline, resumability, review gate | `packages/core/src/pipeline` | Done (memory + SQLite stores; export only approved items) |
+| §2b Culling (blur, near-duplicate) | `packages/core/src/culling` | Done on grayscale buffers. Missing: closed-eye/face detection |
+| §2b/§7b Ingest: embedded-preview extraction, 2048px preview, 512px gray, folder scan | `packages/ingest` | Done (pure-TS JPEG-marker walker finds the largest preview inside CR2/CR3/NEF/ARW/RAF/ORF/DNG/RW2; `jpeg-js` BSD-3 decodes). Previews are re-encoded, so EXIF/GPS is stripped. **Not yet verified on real camera files.** EXIF orientation not applied; files with no embedded JPEG (some DNG/lossless-only) fail with `ASSET_UNREADABLE`; LibRaw fallback still open |
+| §2.5/§2.8/§7g Job pipeline, resumability, review gate | `packages/core/src/pipeline` | Done (memory + SQLite stores; export only approved items; `exportApproved` needs no LLM deps) |
 | §7d Signed entitlements, offline grace | `packages/core/src/licensing` | Done (ed25519); server issuance/billing not built |
 | Adobe XMP sidecar adapter | `packages/adapter-xmp` | Done |
 | RawTherapee adapter | `packages/adapter-rawtherapee` | Done against a fake runner; PP3 keys beyond `Compensation`/denoising are **unverified** on a real install |
+| Agent CLI (`vivah learn / edit / export`) | `packages/cli` | Done: end-to-end folder workflow with providers `mock`, `openai`, `anthropic`, `ollama`, `openai-compatible`; keys from env; stops at the review gate; resumes from `~/.vivahlens/jobs.db`. Interim stand-in for the desktop UI |
 
-**Not yet built:** Tauri desktop app/UI (§2.7), cloud API/billing/galleries (§7c–§7e), Lightroom Lua and Premiere UXP plugins, darktable adapter, Resolve/FCP/Capture One adapters, video pipeline (§7f), RAW preview extraction (LibRaw), signing/updater (§3), i18n/accessibility (§7i). Phase 0 spikes remain the gate for several of these.
+**Run it:** `npm run build`, then `node packages/cli/dist/main.js learn --refs <finished-photos> --name Warm --provider mock` and `... edit --folder <raws> --profile warm.profile.json --provider mock`. Use `--provider openai --model <id>` with `OPENAI_API_KEY` for a real model. The `mock` provider is offline and sends nothing.
+
+**Not yet built:** Tauri desktop app/UI (§2.7), cloud API/billing/galleries (§7c–§7e), Lightroom Lua and Premiere UXP plugins, darktable adapter, Resolve/FCP/Capture One adapters, video pipeline (§7f), LibRaw fallback + EXIF orientation, signing/updater (§3), OS-keychain key storage (keys are env-only today), i18n/accessibility (§7i), cost estimate shown before a run (price table exists in core but the CLI has none configured). Phase 0 spikes remain the gate for several of these.
+
+**Suggested next steps:** (1) run `vivah` on a real RAW set with a real model and measure the Phase 0 acceptance rate; (2) Tauri shell around the CLI's `runJob`/`exportApproved` with the review grid; (3) Lightroom Classic Lua plugin + loopback IPC once the SDK is downloaded; (4) darktable adapter.
 
 ---
 
 ## Change Log
+- **2026-11-22 (impl 2)**: Added `@vivahlens/ingest` (RAW/JPEG preview + grayscale extraction) and `@vivahlens/cli` (end-to-end agent workflow); narrowed `exportApproved` to `StageDeps`; updated Implementation Status.
+- **2026-11-22 (impl 1)**: Core engine, XMP and RawTherapee adapters implemented (see Implementation Status).
 - **2026-11-22 (v2)**: Verified the plan against primary sources ([editor research](docs/research/editor-integration-verification.md), [platform/market research](docs/research/platform-and-market-verification.md)); corrected §1 table (LrC IPC, Adobe cloud EOL, Resolve/Capture One/FCP/Premiere details, GPL policy), §2.1/§2.4/§2.7 (direct desktop→provider image path, extended LLM interface, costs), §2b (culling libraries), §3 (processor package, signing, credentials), §5 (flat competitor pricing, MoR), §6 (new Phase 0 spikes, local-first MVP, deliverable-based phases), and added §7b–§7k (data model, IPC/API, accounts/licensing/billing, delivery, video pipeline, error handling, SLOs, accessibility/i18n, release/launch gate, threat model/licensing).

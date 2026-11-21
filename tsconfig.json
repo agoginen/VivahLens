@@ -3,6 +3,8 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/adapter-xmp" },
-    { "path": "packages/adapter-rawtherapee" }
+    { "path": "packages/adapter-rawtherapee" },
+    { "path": "packages/ingest" },
+    { "path": "packages/cli" }
   ]
 }
