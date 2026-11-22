@@ -11,10 +11,15 @@ const EntitlementSchema = z.object({
   issuedAt: z.number(),
   /** Unix ms. Tokens are short-lived (≤ 7 days) and refreshed whenever the app is online. */
   expiresAt: z.number(),
+  /** Caps that come with the plan, such as the trial's guided batch. Absent on a full plan. */
+  limits: z.object({ maxPhotosPerJob: z.number().int().min(1).optional() }).optional(),
 });
 export type Entitlement = z.infer<typeof EntitlementSchema>;
 
-/** active: fully working. grace: offline past expiry, export-only. expired: must reconnect. */
+/**
+ * Where a signed token stands against the clock. active: before its expiry. grace: past expiry but inside the offline
+ * window, which keeps working while the computer cannot reach the server. expired: beyond that (see `accessFor`).
+ */
 export type EntitlementStatus = "active" | "grace" | "expired";
 
 export const OFFLINE_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -44,12 +49,4 @@ export function verifyEntitlement(
   const status: EntitlementStatus =
     now < entitlement.expiresAt ? "active" : now < entitlement.expiresAt + OFFLINE_GRACE_MS ? "grace" : "expired";
   return { entitlement, status };
-}
-
-/** Throws unless the plan unlocks the adapter and the token is fully active. */
-export function assertAdapterAllowed(result: { entitlement: Entitlement; status: EntitlementStatus }, adapterId: string): void {
-  if (result.status !== "active") throw new VivahError("ENTITLEMENT_EXPIRED", "Entitlement expired; reconnect to continue editing");
-  if (!result.entitlement.adapters.includes(adapterId)) {
-    throw new VivahError("ENTITLEMENT_INVALID", `Plan "${result.entitlement.plan}" does not include adapter "${adapterId}"`);
-  }
 }

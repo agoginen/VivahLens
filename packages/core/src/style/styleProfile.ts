@@ -22,6 +22,9 @@ export type ScalarPath =
   | "blacks"
   | "vibrance"
   | "saturation"
+  | "clarity"
+  | "texture"
+  | "dehaze"
   | "whiteBalance.tempK"
   | "whiteBalance.tint";
 
@@ -34,6 +37,9 @@ export const SCALAR_PATHS: readonly ScalarPath[] = [
   "blacks",
   "vibrance",
   "saturation",
+  "clarity",
+  "texture",
+  "dehaze",
   "whiteBalance.tempK",
   "whiteBalance.tint",
 ];

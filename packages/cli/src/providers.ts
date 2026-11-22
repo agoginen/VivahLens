@@ -2,6 +2,7 @@ import {
   AnthropicProvider,
   LlmGateway,
   OpenAiCompatibleProvider,
+  type GatewayOptions,
   type LlmProvider,
 } from "@vivahlens/core";
 
@@ -23,6 +24,8 @@ export function providerNotice(provider: string): string | undefined {
       return "Anthropic: inputs and outputs are deleted within 30 days (longer if flagged for policy violations); API data is not used for training.";
     case "gemini":
       return "Gemini: paid-tier data is not used to improve products, but project logs are on by default for new projects (55 days). Free-tier keys can be used for training and human review.";
+    case "azure":
+      return "Azure OpenAI: requests are processed in your own Azure resource under your Microsoft agreement; check that resource's data-retention and abuse-monitoring settings. Azure's content filter may decline some photos, which then fail one by one.";
     case "ollama":
     case "mock":
       return undefined;
@@ -34,19 +37,29 @@ export function providerNotice(provider: string): string | undefined {
 /** Offline stand-in so the whole pipeline can be exercised without an API key or any data leaving the machine. */
 export class MockProvider implements LlmProvider {
   readonly id = "mock";
+  readonly local = true;
   async complete(req: Parameters<LlmProvider["complete"]>[0]) {
     const system = req.messages.find((m) => m.role === "system")?.content;
-    const learning = typeof system === "string" && system.includes("analyze a photographer");
-    const text = learning
-      ? JSON.stringify({ summary: "mock style: warm, slightly lifted shadows", baseAdjustments: { exposure: 0.3, contrast: 12, shadows: 15, whiteBalance: { tempK: 5400 } } })
-      : JSON.stringify({ adjustments: { exposure: 0.3, contrast: 12, shadows: 15, whiteBalance: { tempK: 5400 } }, confidence: 0.5, notes: "mock" });
+    const text = typeof system === "string" ? this.reply(system) : "{}";
     return { text, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+
+  private reply(system: string): string {
+    if (system.includes("film editor")) {
+      // Deterministic "storytelling" order for the video pipeline: the reverse of capture order.
+      const n = Number(/You will see (\d+) shots/.exec(system)?.[1] ?? 0);
+      return JSON.stringify({ order: Array.from({ length: n }, (_, i) => n - 1 - i), labels: Array.from({ length: n }, (_, i) => `scene ${i}`) });
+    }
+    const style = { exposure: 0.3, contrast: 12, shadows: 15, whiteBalance: { tempK: 5400 } };
+    return system.includes("analyze a photographer")
+      ? JSON.stringify({ summary: "mock style: warm, slightly lifted shadows", baseAdjustments: style })
+      : JSON.stringify({ adjustments: style, confidence: 0.5, notes: "mock" });
   }
 }
 
 /** Keys come from the environment for now; the desktop app will move them to the OS keychain. */
-export function buildGateway(choice: ProviderChoice, env: Record<string, string | undefined>): LlmGateway {
-  const gateway = new LlmGateway({ maxCostUsd: choice.maxCostUsd, retry: { attempts: 3, baseDelayMs: 1000 } });
+export function buildGateway(choice: ProviderChoice, env: Record<string, string | undefined>, extra: Pick<GatewayOptions, "onTransfer" | "onCall" | "prices"> = {}): LlmGateway {
+  const gateway = new LlmGateway({ maxCostUsd: choice.maxCostUsd, retry: { attempts: 3, baseDelayMs: 1000 }, ...extra });
   let provider: LlmProvider;
   switch (choice.provider) {
     case "mock":
@@ -74,12 +87,16 @@ export function buildGateway(choice: ProviderChoice, env: Record<string, string 
     case "ollama":
       provider = new OpenAiCompatibleProvider({ id: "ollama", baseUrl: choice.baseUrl ?? "http://localhost:11434/v1" });
       break;
+    case "azure":
+      if (!choice.baseUrl) throw new Error("--base-url is required for --provider azure, e.g. https://<resource>.openai.azure.com/openai/v1 (and --model is your deployment name)");
+      provider = new OpenAiCompatibleProvider({ id: "azure", baseUrl: choice.baseUrl, apiKey: requireKey(env, "AZURE_OPENAI_API_KEY"), authHeader: "api-key" });
+      break;
     case "openai-compatible":
       if (!choice.baseUrl) throw new Error("--base-url is required for --provider openai-compatible");
       provider = new OpenAiCompatibleProvider({ id: "openai-compatible", baseUrl: choice.baseUrl, apiKey: env.VIVAH_API_KEY });
       break;
     default:
-      throw new Error(`Unknown provider "${choice.provider}". Use mock, openai, anthropic, gemini, ollama or openai-compatible.`);
+      throw new Error(`Unknown provider "${choice.provider}". Use mock, openai, anthropic, gemini, azure, ollama or openai-compatible.`);
   }
   return gateway.registerProvider(provider).setRoute("vision", { providerId: provider.id, model: choice.model });
 }

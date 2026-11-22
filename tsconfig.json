@@ -4,10 +4,15 @@
     { "path": "packages/core" },
     { "path": "packages/adapter-xmp" },
     { "path": "packages/adapter-rawtherapee" },
+    { "path": "packages/adapter-darktable" },
     { "path": "packages/ingest" },
+    { "path": "packages/render" },
+    { "path": "packages/delivery" },
     { "path": "packages/review" },
     { "path": "packages/lightroom" },
     { "path": "packages/testkit" },
+    { "path": "packages/video" },
+    { "path": "packages/cloud-api" },
     { "path": "packages/cli" }
   ]
 }

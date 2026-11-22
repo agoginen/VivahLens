@@ -25,8 +25,13 @@ const adjustments = z
     blacks: slider,
     vibrance: slider,
     saturation: slider,
+    /** Mid-tone contrast ("Clarity" in Lightroom, local contrast elsewhere). */
+    clarity: slider,
+    texture: slider,
+    dehaze: slider,
     toneCurve: z.array(z.object({ input: z.number().min(0).max(255), output: z.number().min(0).max(255) })),
-    hsl: z.record(z.enum(HSL_COLORS), hslBand),
+    // An object with one key per colour (rather than a record) so the JSON Schema lists the colours explicitly.
+    hsl: z.object(Object.fromEntries(HSL_COLORS.map((c) => [c, hslBand])) as Record<HslColor, typeof hslBand>).partial().strict(),
     splitToning: z
       .object({
         highlightHue: z.number().min(0).max(360),
@@ -36,6 +41,7 @@ const adjustments = z
         balance: slider,
       })
       .partial(),
+    /** `x`, `y`, `width` and `height` are fractions (0 to 1) of the image, from its top-left corner; `rotationDeg` straightens. */
     crop: z
       .object({
         aspectRatio: z.string(),
@@ -46,6 +52,9 @@ const adjustments = z
         rotationDeg: z.number(),
       })
       .partial(),
+    /** Darkening (negative amount) or lightening (positive) of the corners, applied after cropping. */
+    vignette: z.object({ amount: slider, midpoint: pct, feather: pct, roundness: slider }).partial(),
+    grain: z.object({ amount: pct, size: pct, roughness: pct }).partial(),
     noiseReduction: z.object({ luminance: pct, color: pct }).partial(),
     sharpening: z
       .object({ amount: z.number().min(0).max(150), radius: z.number().min(0.5).max(3) })

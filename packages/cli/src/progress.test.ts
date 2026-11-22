@@ -36,10 +36,30 @@ describe("providers", () => {
     expect(() => buildGateway({ provider: "gemini", model: "m", confirmedPaidTier: true }, { GEMINI_API_KEY: "k" })).not.toThrow();
   });
 
+  it("builds Azure OpenAI from a base URL and key, authenticating with the api-key header and addressing the deployment by model", async () => {
+    expect(() => buildGateway({ provider: "azure", model: "my-deployment" }, { AZURE_OPENAI_API_KEY: "k" })).toThrow(/--base-url is required/);
+    expect(() => buildGateway({ provider: "azure", model: "d", baseUrl: "https://r.openai.azure.com/openai/v1" }, {})).toThrow(/AZURE_OPENAI_API_KEY/);
+
+    const seen: { url: string; key?: string; model?: string }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      seen.push({ url, key: (init.headers as Record<string, string>)["api-key"], model: JSON.parse(String(init.body)).model });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const gateway = buildGateway({ provider: "azure", model: "my-deployment", baseUrl: "https://r.openai.azure.com/openai/v1/" }, { AZURE_OPENAI_API_KEY: "azure-key" });
+      await gateway.complete("vision", { messages: [{ role: "user", content: "hi" }] });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toEqual([{ url: "https://r.openai.azure.com/openai/v1/chat/completions", key: "azure-key", model: "my-deployment" }]);
+  });
+
   it("discloses data handling for hosted providers but not for local or mock ones", () => {
     expect(providerNotice("openai")).toMatch(/30 days/);
     expect(providerNotice("anthropic")).toMatch(/30 days/);
     expect(providerNotice("gemini")).toMatch(/Free-tier/);
+    expect(providerNotice("azure")).toMatch(/content filter/);
     expect(providerNotice("openai-compatible")).toMatch(/not known/);
     expect(providerNotice("ollama")).toBeUndefined();
     expect(providerNotice("mock")).toBeUndefined();

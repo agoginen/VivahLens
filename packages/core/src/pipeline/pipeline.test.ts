@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { AssetRef, EditorAdapter } from "../adapters/editorAdapter.js";
+import type { AssetRef, EditorAdapter, ExportSpec } from "../adapters/editorAdapter.js";
 import type { GrayImage } from "../culling/metrics.js";
 import { VivahError } from "../errors.js";
 import { LlmGateway } from "../llm/gateway.js";
@@ -32,11 +32,12 @@ function fakeLlm(denied = new Set<string>()) {
   return { gateway, calls, denied };
 }
 
-function fakeAdapter(failApply = new Set<string>()) {
+function fakeAdapter(failApply = new Set<string>(), opts: { exportResize?: boolean } = {}) {
   const applied: { id: string; recipe: EditRecipe }[] = [];
+  const exportSpecs: ExportSpec[] = [];
   const adapter: EditorAdapter = {
     id: "fake-editor",
-    capabilities: { mediaKinds: ["photo"], executionModel: "local-cli", requiresGuiOpen: false, os: ["windows", "macos"], supportedRecipeFields: ["exposure"] },
+    capabilities: { mediaKinds: ["photo"], executionModel: "local-cli", requiresGuiOpen: false, os: ["windows", "macos"], supportedRecipeFields: ["exposure"], exportResize: opts.exportResize },
     detect: async () => ({}),
     async applyRecipe(asset, recipe) {
       if (failApply.has(asset.id)) throw new VivahError("ADAPTER_APPLY_FAILED", "boom");
@@ -44,10 +45,11 @@ function fakeAdapter(failApply = new Set<string>()) {
       return { assetId: asset.id, outputs: [`${asset.path}.sidecar`] };
     },
     async export(asset, spec) {
-      return { assetId: asset.id, file: path.join(spec.outputDir, `${asset.id}.jpg`) };
+      exportSpecs.push(spec);
+      return { assetId: asset.id, file: path.join(spec.outputDir, `${spec.fileName ?? asset.id}.jpg`) };
     },
   };
-  return { adapter, applied };
+  return { adapter, applied, exportSpecs };
 }
 
 const asset = (id: string): AssetRef => ({ id, kind: "photo", path: `/shoot/${id}.cr3` });
@@ -161,5 +163,176 @@ describe("exportApproved", () => {
     const result = await exportApproved(d, "j5", assets, { approve: ["a"], overrides: { a: bad }, exportSpec: { format: "jpeg", outputDir: "/out" } });
     expect(result.exported).toEqual([]);
     expect(result.failed).toHaveLength(1);
+  });
+
+  describe("delivery step (afterExport)", () => {
+    const spec: ExportSpec = { format: "jpeg", maxEdgePx: 2048, quality: 85, outputDir: "/out" };
+
+    it("runs on every exported file with the requested spec before the item counts as exported", async () => {
+      const { adapter } = fakeAdapter(new Set(), { exportResize: true });
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      const assets = [asset("a"), asset("b")];
+      await runJob(d, { id: "j6", name: "x", assets });
+
+      const finished: { file: string; id: string; spec: ExportSpec; stateWhenCalled: string | undefined }[] = [];
+      const result = await exportApproved(
+        {
+          ...d,
+          afterExport: async (file, a, s) => {
+            finished.push({ file, id: a.id, spec: s, stateWhenCalled: d.store.listItems("j6").find((i) => i.assetId === a.id)?.state });
+          },
+        },
+        "j6",
+        assets,
+        { approve: ["a", "b"], exportSpec: spec },
+      );
+
+      expect(finished.map((f) => f.id).sort()).toEqual(["a", "b"]);
+      expect(finished.every((f) => f.spec === spec && f.stateWhenCalled === "review")).toBe(true);
+      expect(result.exported.map((e) => e.file).sort()).toEqual([path.join("/out", "a.jpg"), path.join("/out", "b.jpg")]);
+    });
+
+    it("fails only the item whose delivery step throws, with a stable code, and does not report it as exported", async () => {
+      const { adapter } = fakeAdapter(new Set(), { exportResize: true });
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      const assets = [asset("a"), asset("b")];
+      await runJob(d, { id: "j7", name: "x", assets });
+
+      const result = await exportApproved(
+        { ...d, afterExport: async (_file, a) => { if (a.id === "b") throw new Error("could not decode"); } },
+        "j7",
+        assets,
+        { approve: ["a", "b"], exportSpec: spec },
+      );
+
+      expect(result.exported.map((e) => e.assetId)).toEqual(["a"]);
+      expect(result.failed).toEqual([{ assetId: "b", code: "EXPORT_FINISH_FAILED", message: "b.jpg was exported but could not be finished: could not decode" }]);
+      expect(d.store.listItems("j7").find((i) => i.assetId === "b")).toMatchObject({ state: "failed", failedFrom: "review" });
+    });
+
+    it("hands full resolution to adapters that cannot resize and leaves the size to the delivery step", async () => {
+      const { adapter, exportSpecs } = fakeAdapter(); // capability absent = cannot resize
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      const assets = [asset("a")];
+      await runJob(d, { id: "j8", name: "x", assets });
+
+      let seen: ExportSpec | undefined;
+      const result = await exportApproved({ ...d, afterExport: async (_f, _a, s) => void (seen = s) }, "j8", assets, { approve: ["a"], exportSpec: spec });
+      expect(result.exported).toHaveLength(1);
+      expect(exportSpecs).toEqual([{ format: "jpeg", quality: 85, outputDir: "/out", fileName: "a" }]);
+      expect(seen!.maxEdgePx).toBe(2048);
+    });
+
+    it("passes the size straight to adapters that can resize", async () => {
+      const { adapter, exportSpecs } = fakeAdapter(new Set(), { exportResize: true });
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      const assets = [asset("a")];
+      await runJob(d, { id: "j9", name: "x", assets });
+      await exportApproved(d, "j9", assets, { approve: ["a"], exportSpec: spec });
+      expect(exportSpecs).toEqual([{ ...spec, fileName: "a" }]);
+    });
+
+    it("refuses to export a size nobody can produce, before touching any photo", async () => {
+      const { adapter, exportSpecs } = fakeAdapter();
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      const assets = [asset("a")];
+      await runJob(d, { id: "j10", name: "x", assets });
+
+      await expect(exportApproved(d, "j10", assets, { approve: ["a"], exportSpec: spec })).rejects.toMatchObject({ code: "ADAPTER_APPLY_FAILED", message: expect.stringMatching(/cannot resize/) });
+      expect(exportSpecs).toEqual([]);
+      expect(d.store.listItems("j10")[0]!.state).toBe("review");
+
+      // Full resolution needs no delivery step.
+      const full = await exportApproved(d, "j10", assets, { approve: ["a"], exportSpec: { format: "jpeg", outputDir: "/out" } });
+      expect(full.exported).toHaveLength(1);
+    });
+  });
+
+  describe("export file names", () => {
+    const at = (file: string): AssetRef => ({ id: file, kind: "photo", path: `/shoot/${file}` });
+    const spec: ExportSpec = { format: "jpeg", outputDir: "/out" };
+    const pair = [at("IMG_001.cr3"), at("IMG_001.jpg"), at("IMG_002.cr3")];
+
+    it("gives a RAW and its camera JPEG their own export files instead of letting one overwrite the other", async () => {
+      const { adapter } = fakeAdapter();
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      await runJob(d, { id: "n1", name: "x", assets: pair });
+
+      const result = await exportApproved(d, "n1", pair, { approve: pair.map((a) => a.id), exportSpec: spec });
+      expect(Object.fromEntries(result.exported.map((e) => [e.assetId, path.basename(e.file)]))).toEqual({
+        "IMG_001.cr3": "IMG_001.jpg",
+        "IMG_001.jpg": "IMG_001-jpg.jpg",
+        "IMG_002.cr3": "IMG_002.jpg",
+      });
+      expect(result.failed).toEqual([]);
+    });
+
+    it("decides names over all of the job's photos, so a photo keeps its name whatever is approved with it", async () => {
+      const { adapter } = fakeAdapter();
+      const d = deps({ gateway: fakeLlm().gateway, adapter });
+      await runJob(d, { id: "n2", name: "x", assets: pair });
+
+      const onlyJpeg = await exportApproved(d, "n2", pair, { approve: ["IMG_001.jpg"], exportSpec: spec });
+      expect(path.basename(onlyJpeg.exported[0]!.file)).toBe("IMG_001-jpg.jpg");
+      const onlyRaw = await exportApproved(d, "n2", pair, { approve: ["IMG_001.cr3"], exportSpec: spec });
+      expect(path.basename(onlyRaw.exported[0]!.file)).toBe("IMG_001.jpg");
+    });
+
+    it("deletes a file two photos were written to, and fails both, when an adapter ignores the file name", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "vivah-names-"));
+      try {
+        const { adapter } = fakeAdapter();
+        const stubborn: EditorAdapter = {
+          ...adapter,
+          async export(asset, s) {
+            // Ignores the file name for the RAW+JPEG pair, as a careless adapter would.
+            const file = path.join(s.outputDir, asset.id.startsWith("IMG_001") ? "shared.jpg" : `${s.fileName}.jpg`);
+            writeFileSync(file, `unfinished export of ${asset.id}`);
+            return { assetId: asset.id, file };
+          },
+        };
+        const d = deps({ gateway: fakeLlm().gateway, adapter: stubborn });
+        await runJob(d, { id: "n3", name: "x", assets: pair });
+
+        const result = await exportApproved(d, "n3", pair, { approve: pair.map((a) => a.id), exportSpec: { format: "jpeg", outputDir: dir } });
+        expect(result.exported.map((e) => e.assetId)).toEqual(["IMG_002.cr3"]);
+        expect(result.failed.map((f) => f.assetId).sort()).toEqual(["IMG_001.cr3", "IMG_001.jpg"]);
+        expect(result.failed[0]).toMatchObject({ code: "ADAPTER_APPLY_FAILED", message: expect.stringContaining("shared.jpg") });
+        expect(existsSync(path.join(dir, "shared.jpg"))).toBe(false);
+        expect(existsSync(path.join(dir, "IMG_002.jpg"))).toBe(true);
+        const failed = d.store.listItems("n3").filter((i) => i.state === "failed");
+        expect(failed.map((i) => i.exportedFile)).toEqual([undefined, undefined]);
+        expect(failed.every((i) => i.failedFrom === "review")).toBe(true);
+        expect(result.failed[0]!.message).toContain("The file was removed");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("says so, and still fails the photos, when the shared file cannot be removed", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "vivah-names-"));
+      try {
+        const { adapter } = fakeAdapter();
+        // A directory where the adapter claims to have written a file: removing it without `recursive` fails.
+        const stubborn: EditorAdapter = {
+          ...adapter,
+          async export(asset, s) {
+            const file = path.join(s.outputDir, "shared.jpg");
+            mkdirSync(file, { recursive: true });
+            return { assetId: asset.id, file };
+          },
+        };
+        const d = deps({ gateway: fakeLlm().gateway, adapter: stubborn });
+        const two = pair.slice(0, 2);
+        await runJob(d, { id: "n4", name: "x", assets: two });
+
+        const result = await exportApproved(d, "n4", two, { approve: two.map((a) => a.id), exportSpec: { format: "jpeg", outputDir: dir } });
+        expect(result.exported).toEqual([]);
+        expect(result.failed).toHaveLength(2);
+        expect(result.failed[0]!.message).toMatch(/could not be removed: delete .*shared\.jpg yourself/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });

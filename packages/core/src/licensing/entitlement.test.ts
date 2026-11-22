@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { assertAdapterAllowed, OFFLINE_GRACE_MS, signEntitlement, verifyEntitlement } from "./entitlement.js";
+import { OFFLINE_GRACE_MS, signEntitlement, verifyEntitlement } from "./entitlement.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const DAY = 24 * 60 * 60 * 1000;
@@ -21,12 +21,13 @@ describe("entitlements", () => {
     expect(() => verifyEntitlement(forged, publicKey)).toThrowError(expect.objectContaining({ code: "ENTITLEMENT_INVALID" }));
   });
 
-  it("only allows adapters in the plan while active", () => {
-    const active = verifyEntitlement(token, publicKey, DAY);
-    expect(() => assertAdapterAllowed(active, "xmp-sidecar")).not.toThrow();
-    expect(() => assertAdapterAllowed(active, "rawtherapee")).toThrowError(expect.objectContaining({ code: "ENTITLEMENT_INVALID" }));
-    expect(() => assertAdapterAllowed(verifyEntitlement(token, publicKey, 8 * DAY), "xmp-sidecar")).toThrowError(
-      expect.objectContaining({ code: "ENTITLEMENT_EXPIRED" }),
-    );
+  it("carries plan limits inside the signed payload, so they cannot be edited out", () => {
+    const limited = signEntitlement({ ...base, plan: "trial", limits: { maxPhotosPerJob: 50 } }, privateKey);
+    expect(verifyEntitlement(limited, publicKey, DAY).entitlement.limits).toEqual({ maxPhotosPerJob: 50 });
+    expect(verifyEntitlement(token, publicKey, DAY).entitlement.limits).toBeUndefined();
+    const [, sig] = limited.split(".");
+    const stripped = `${Buffer.from(JSON.stringify({ ...base, plan: "trial" })).toString("base64url")}.${sig}`;
+    expect(() => verifyEntitlement(stripped, publicKey, DAY)).toThrowError(expect.objectContaining({ code: "ENTITLEMENT_INVALID" }));
+    expect(() => signEntitlement({ ...base, limits: { maxPhotosPerJob: 0 } }, privateKey)).toThrow();
   });
 });

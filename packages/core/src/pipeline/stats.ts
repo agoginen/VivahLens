@@ -7,7 +7,7 @@ export interface JobStats {
   rejected: { blurry: number; duplicate: number; duplicateFile: number };
   failed: number;
   awaitingReview: number;
-  /** Photos the reviewer approved (exported or approved), changed or not. */
+  /** Photos the reviewer approved (exported, approved or delivered), changed or not. */
   approved: number;
   approvedUnchanged: number;
   overridden: number;
@@ -21,7 +21,7 @@ export interface JobStats {
 /** Metrics that answer "do photographers accept what the AI proposes?" from persisted job state. */
 export function jobStats(store: JobStore, jobId: string, library?: LibraryStore): JobStats {
   const items = store.listItems(jobId);
-  const approvedItems = items.filter((i) => i.state === "approved" || i.state === "exported");
+  const approvedItems = items.filter((i) => i.state === "approved" || i.state === "exported" || i.state === "delivered");
   const overridden = approvedItems.filter((i) => i.overridden).length;
   const correctionsByField: Record<string, number> = {};
   for (const o of library?.listOverrides(jobId) ?? []) correctionsByField[o.path] = (correctionsByField[o.path] ?? 0) + 1;

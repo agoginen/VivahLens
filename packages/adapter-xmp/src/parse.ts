@@ -2,6 +2,13 @@ import { HSL_COLORS, type EditRecipe, type HslColor, type RecipeAdjustments } fr
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
+/** The text items of a list setting stored as `<crs:Name><rdf:Seq><rdf:li>…</rdf:li>…</rdf:Seq></crs:Name>`, such as the tone curve. */
+export function readCrsSequence(xmp: string, name: string): string[] {
+  const element = new RegExp(`<crs:${name}\\b[^>]*>([\\s\\S]*?)</crs:${name}>`).exec(xmp);
+  if (!element) return [];
+  return [...element[1]!.matchAll(/<rdf:li>([^<]*)<\/rdf:li>/g)].map((m) => m[1]!.trim());
+}
+
 /** Camera Raw settings from an XMP packet: attribute form (`crs:Key="v"`) and simple element form (`<crs:Key>v</crs:Key>`). */
 export function readCrsSettings(xmp: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -33,6 +40,10 @@ export function parseCrsToRecipe(xmp: string): EditRecipe | undefined {
     const n = num(key);
     return n === undefined ? undefined : clamp(n, -100, 100);
   };
+  const percent = (key: string) => {
+    const n = num(key);
+    return n === undefined ? undefined : clamp(n, 0, 100);
+  };
 
   const exposure = num("Exposure2012");
   set("exposure", exposure === undefined ? undefined : clamp(exposure, -5, 5));
@@ -43,6 +54,9 @@ export function parseCrsToRecipe(xmp: string): EditRecipe | undefined {
   set("blacks", slider("Blacks2012"));
   set("vibrance", slider("Vibrance"));
   set("saturation", slider("Saturation"));
+  set("clarity", slider("Clarity2012"));
+  set("texture", slider("Texture"));
+  set("dehaze", slider("Dehaze"));
 
   if (s.WhiteBalance === "Custom") {
     const temp = num("Temperature");
@@ -87,6 +101,28 @@ export function parseCrsToRecipe(xmp: string): EditRecipe | undefined {
   const radius = num("SharpenRadius");
   if (amount !== undefined || radius !== undefined) {
     adj.sharpening = { ...(amount !== undefined && { amount: clamp(amount, 0, 150) }), ...(radius !== undefined && { radius: clamp(radius, 0.5, 3) }) };
+  }
+
+  const vignette = { amount: slider("PostCropVignetteAmount"), midpoint: percent("PostCropVignetteMidpoint"), feather: percent("PostCropVignetteFeather"), roundness: slider("PostCropVignetteRoundness") };
+  if (Object.values(vignette).some((v) => v !== undefined)) adj.vignette = Object.fromEntries(Object.entries(vignette).filter(([, v]) => v !== undefined));
+  const grain = { amount: percent("GrainAmount"), size: percent("GrainSize"), roughness: percent("GrainFrequency") };
+  if (Object.values(grain).some((v) => v !== undefined)) adj.grain = Object.fromEntries(Object.entries(grain).filter(([, v]) => v !== undefined));
+
+  const curve = readCrsSequence(xmp, "ToneCurvePV2012")
+    .map((item) => /^\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*$/.exec(item))
+    .flatMap((m) => (m ? [{ input: clamp(Number(m[1]), 0, 255), output: clamp(Number(m[2]), 0, 255) }] : []));
+  // A curve that is the straight line from corner to corner is Lightroom's way of saying "no curve".
+  if (curve.length >= 2 && curve.some((p) => p.input !== p.output)) adj.toneCurve = curve;
+
+  if (s.HasCrop === "True") {
+    const [left, top, right, bottom] = ["CropLeft", "CropTop", "CropRight", "CropBottom"].map((k) => num(k));
+    if (left !== undefined && top !== undefined && right !== undefined && bottom !== undefined && right > left && bottom > top) {
+      const angle = num("CropAngle");
+      const round6 = (n: number) => Number(n.toFixed(6));
+      const l = clamp(left, 0, 1);
+      const t = clamp(top, 0, 1);
+      adj.crop = { x: l, y: t, width: round6(clamp(right, 0, 1) - l), height: round6(clamp(bottom, 0, 1) - t), ...(angle !== undefined && angle !== 0 && { rotationDeg: angle }) };
+    }
   }
 
   return { version: "1.0", assetType: "photo", adjustments: adj };

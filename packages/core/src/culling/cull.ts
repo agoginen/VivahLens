@@ -1,4 +1,4 @@
-import { differenceHash, hammingDistance, laplacianVariance, type GrayImage } from "./metrics.js";
+import { clippedShare, differenceHash, hammingDistance, laplacianVariance, type GrayImage } from "./metrics.js";
 
 export interface CullInput {
   id: string;
@@ -20,23 +20,37 @@ export interface CullOptions {
   duplicateDistance?: number;
 }
 
-/** Rejects blurry frames and keeps only the sharpest frame of each near-duplicate group. Order is preserved. */
+/**
+ * Frames at least this fraction as sharp as the sharpest of their burst count as equally sharp: a difference that small is
+ * noise in the measure, not in the photograph, so exposure decides between them. A starting point, not tuned on real bursts.
+ */
+const NEAR_TIE = 0.85;
+
+type Frame = { id: string; score: number; hash: bigint; clipped: number };
+
+/** The sharpest frame of a burst; among near-equals, the one with the least blown-out or crushed picture; then the sharper. */
+function bestOfBurst(group: readonly Frame[]): Frame {
+  const sharpest = Math.max(...group.map((f) => f.score));
+  return group.filter((f) => f.score >= sharpest * NEAR_TIE).reduce((a, b) => (b.clipped < a.clipped || (b.clipped === a.clipped && b.score > a.score) ? b : a));
+}
+
+/** Rejects blurry frames and keeps only the best frame of each near-duplicate group. Order is preserved. */
 export function cullBatch(items: readonly CullInput[], opts: CullOptions = {}): CullResult {
   const blurThreshold = opts.blurThreshold ?? 100;
   const dupDistance = opts.duplicateDistance ?? 6;
 
   const scores: Record<string, number> = {};
   const rejected: CullResult["rejected"] = [];
-  const sharp: { id: string; score: number; hash: bigint }[] = [];
+  const sharp: Frame[] = [];
 
   for (const item of items) {
     const score = laplacianVariance(item.image);
     scores[item.id] = score;
     if (score < blurThreshold) rejected.push({ id: item.id, reason: "blurry" });
-    else sharp.push({ id: item.id, score, hash: differenceHash(item.image) });
+    else sharp.push({ id: item.id, score, hash: differenceHash(item.image), clipped: clippedShare(item.image) });
   }
 
-  const groups: (typeof sharp)[] = [];
+  const groups: Frame[][] = [];
   for (const frame of sharp) {
     const group = groups.find((g) => g.some((m) => hammingDistance(m.hash, frame.hash) <= dupDistance));
     if (group) group.push(frame);
@@ -45,7 +59,7 @@ export function cullBatch(items: readonly CullInput[], opts: CullOptions = {}): 
 
   const keptIds = new Set<string>();
   for (const group of groups) {
-    const best = group.reduce((a, b) => (b.score > a.score ? b : a));
+    const best = bestOfBurst(group);
     keptIds.add(best.id);
     for (const frame of group) {
       if (frame !== best) rejected.push({ id: frame.id, reason: "duplicate", keptInstead: best.id });

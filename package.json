@@ -10,14 +10,18 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/copy-assets.mjs",
     "test": "vitest run",
     "schema": "node scripts/emit-schema.mjs",
     "licenses": "node scripts/check-licenses.mjs",
+    "sbom": "node scripts/sbom.mjs",
+    "sea": "node scripts/build-sea.mjs",
     "ci": "npm run build && npm test && npm run licenses"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

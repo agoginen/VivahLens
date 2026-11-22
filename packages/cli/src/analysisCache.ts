@@ -8,10 +8,13 @@ import type { AssetRef, GrayImage } from "@vivahlens/core";
 export class AnalysisCache {
   private entries = new Map<string, { analysis: Promise<Analysis>; grayTaken: boolean }>();
 
+  /** `load` decodes a photo (default: in this thread); a decode pool supplies one that runs on worker threads. */
+  constructor(private readonly load: (asset: AssetRef) => Promise<Analysis> = (asset) => loadAnalysis(asset)) {}
+
   private entry(asset: AssetRef) {
     let e = this.entries.get(asset.id);
     if (!e) {
-      e = { analysis: loadAnalysis(asset), grayTaken: false };
+      e = { analysis: this.load(asset), grayTaken: false };
       this.entries.set(asset.id, e);
     }
     return e;

@@ -26,6 +26,9 @@ jobs:
       - run: npm test
       - name: Licence gate and NOTICE
         run: npm run licenses
+      - name: Single-file program (build, then run it through its paces)
+        if: matrix.node == '24.x'
+        run: npm run sea
       - name: EditRecipe JSON Schema is up to date
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
         run: |

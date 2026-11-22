@@ -4,6 +4,7 @@ import jpeg from "jpeg-js";
 import { VivahError, type AssetRef, type GrayImage, type Preview } from "@vivahlens/core";
 import { extractEmbeddedJpeg } from "./embeddedJpeg.js";
 import { readExif, type ExifInfo } from "./exif.js";
+import { findExifSegment } from "./exifSegment.js";
 import { applyOrientation, readOrientation, type Rgba } from "./orientation.js";
 
 export const RAW_EXTENSIONS = [".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".dng", ".rw2"] as const;
@@ -72,6 +73,21 @@ export function downscale(img: Rgba, maxEdge: number): Rgba {
     }
   }
   return { width: w, height: h, data: out };
+}
+
+/**
+ * The picture to edit and show: a JPEG itself, or a RAW file's embedded preview (the part a camera makes, not a develop of
+ * the raw data), turned upright, shrunk to `maxEdge` when given.
+ */
+export async function loadRgba(asset: AssetRef, opts: { maxEdge?: number } = {}): Promise<Rgba> {
+  const full = await decodePreview(asset.path);
+  return opts.maxEdge ? downscale(full, opts.maxEdge) : full;
+}
+
+/** The EXIF block (camera, lens, capture time) of an asset's picture, for carrying into a finished JPEG; undefined when there is none. */
+export async function loadExifSegment(asset: AssetRef): Promise<Uint8Array | undefined> {
+  const { embedded } = await readAsset(asset.path);
+  return findExifSegment(embedded);
 }
 
 /** JPEG preview (default 2048px long edge) for the LLM. Originals never leave the machine. */

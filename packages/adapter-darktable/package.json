@@ -1,0 +1,16 @@
+{
+  "name": "@vivahlens/adapter-darktable",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": {
+    "@vivahlens/core": "*"
+  },
+  "devDependencies": {
+    "@vivahlens/testkit": "*"
+  }
+}

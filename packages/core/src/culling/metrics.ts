@@ -25,6 +25,13 @@ export function laplacianVariance(img: GrayImage): number {
   return sumSq / n - mean * mean;
 }
 
+/** The share of pixels that are blown out (250 or more) or crushed (5 or less), where an edit cannot bring the detail back. */
+export function clippedShare(img: GrayImage): number {
+  let clipped = 0;
+  for (const v of img.data) if (v >= 250 || v <= 5) clipped++;
+  return img.data.length ? clipped / img.data.length : 0;
+}
+
 /** 64-bit difference hash: robust to resizing and small exposure changes. */
 export function differenceHash(img: GrayImage): bigint {
   const { width: w, height: h, data } = img;

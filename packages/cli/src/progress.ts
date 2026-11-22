@@ -1,11 +1,12 @@
-import type { ItemState } from "@vivahlens/core";
-
-const LABELS: Partial<Record<ItemState, string>> = {
+const LABELS: Record<string, string> = {
   queued: "Reading files",
   culled: "Culling",
+  "style-matched": "Matching your style",
   "recipe-generated": "Proposing edits",
   review: "Applying edits",
   exported: "Exporting",
+  delivered: "Delivering",
+  finishing: "Finishing files",
 };
 
 export function formatDuration(seconds: number): string {
@@ -23,7 +24,7 @@ export function progressPrinter(log: (line: string) => void, intervalMs = 2000, 
   let stage: string | undefined;
   let startedAt = 0;
   let lastPrint = 0;
-  return (e: { stage: ItemState; done: number; total: number }): void => {
+  return (e: { stage: string; done: number; total: number }): void => {
     const t = now();
     if (e.stage !== stage) {
       stage = e.stage;

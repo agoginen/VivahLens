@@ -1,0 +1,86 @@
+# Builds what a photographer installs: one executable per platform, with its bill of materials and checksums, as a DRAFT
+# release for a person to look over, sign and publish.
+#
+# NEVER RUN: this workflow could not be tried outside GitHub, and the macOS and Linux builds have not been run anywhere
+# (the Windows build has: see docs/research/platform-release-security-verification-3.md §4 and `npm run sea`).
+# NOT DONE HERE, because they need credentials that are not in this repository:
+#   - Windows: Authenticode signing (signtool sign /fd SHA256 /tr <timestamp server> /td SHA256 vivah.exe)
+#   - macOS: Developer ID signing and notarization (the binary is only ad-hoc signed)
+#   - publishing the signed update manifest (scripts/signing.mjs publish, which needs VIVAH_ADMIN_KEY)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  executable:
+    name: executable / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64, ext: ".exe" }
+          - { os: macos-latest, target: macos-arm64, ext: "" }
+          - { os: ubuntu-latest, target: linux-x64, ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      # Build, every test and the licence gate, then the executable, which is run through its paces before it is kept.
+      - run: npm run ci
+      - run: npm run sea
+      - name: Name and checksum the file
+        shell: bash
+        run: |
+          mkdir release
+          cp "dist-sea/vivah${{ matrix.ext }}" "release/vivah-${{ matrix.target }}${{ matrix.ext }}"
+          cd release
+          if command -v sha256sum >/dev/null; then sha256sum * > "SHA256SUMS-${{ matrix.target }}.txt"; else shasum -a 256 * > "SHA256SUMS-${{ matrix.target }}.txt"; fi
+          cat "SHA256SUMS-${{ matrix.target }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vivah-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
+
+  bill-of-materials:
+    name: bill of materials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: node scripts/sbom.mjs --out sbom.cdx.json
+      - run: node scripts/sbom.mjs --package @vivahlens/cloud-api --out sbom.cloud-api.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bill-of-materials
+          path: sbom*.cdx.json
+          if-no-files-found: error
+
+  draft-release:
+    name: draft release
+    needs: [executable, bill-of-materials]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" assets/* --repo "${{ github.repository }}" --draft --generate-notes --title "${{ github.ref_name }}"

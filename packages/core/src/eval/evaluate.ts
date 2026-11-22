@@ -13,6 +13,9 @@ export const DEFAULT_TOLERANCES: Tolerances = {
   blacks: 15,
   vibrance: 15,
   saturation: 15,
+  clarity: 15,
+  texture: 15,
+  dehaze: 15,
   "whiteBalance.tempK": 400,
   "whiteBalance.tint": 10,
 };

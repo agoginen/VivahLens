@@ -38,7 +38,7 @@ function cli(args: string[], env: Record<string, string> = {}) {
   const lines: string[] = [];
   const stdout: string[] = [];
   return runCli(args, {
-    env,
+    env: { VIVAH_HOME: path.join(root, "home"), ...env },
     log: (l) => (stdout.push(l), lines.push(l)),
     info: (l) => void lines.push(l),
   }).then((code) => ({ code, out: lines.join("\n"), stdout: stdout.join("\n") }));
@@ -121,12 +121,43 @@ describe("vivah CLI (mock provider)", () => {
     expect((await cli(["eval", "--folder", shoot, "--profile", profile, "--provider", "mock"])).out).toContain("No photos with a sibling .xmp edit made by you");
   });
 
+  it("with --perceptual, also scores the look: draws both edits on the photo and compares the two pictures", async () => {
+    const gold = path.join(root, "gold-look");
+    mkdirSync(gold);
+    // The mock model proposes exposure +0.3, contrast +12, shadows +15, 5400K: g1 is close to that, g3 is over two stops darker.
+    const edits: Record<string, string> = {
+      g1: 'crs:Exposure2012="+0.40" crs:Contrast2012="+10" crs:Shadows2012="+20" crs:WhiteBalance="Custom" crs:Temperature="5300"',
+      g3: 'crs:Exposure2012="-2.00" crs:Contrast2012="+10"',
+    };
+    for (const [name, attrs] of Object.entries(edits)) {
+      writeFileSync(path.join(gold, `${name}.jpg`), photo({ sharp: true }));
+      writeFileSync(path.join(gold, `${name}.xmp`), `<x:xmpmeta><rdf:Description crs:HasSettings="True" ${attrs}/></x:xmpmeta>`);
+    }
+    const args = ["eval", "--folder", gold, "--profile", profile, "--provider", "mock"];
+
+    const report = JSON.parse((await cli([...args, "--perceptual", "--json"])).stdout) as {
+      perceptual: { scored: number; skipped: number; meanDeltaE: number; cases: { id: string; deltaE: { mean: number }; ssim: number }[] };
+    };
+    expect(report.perceptual).toMatchObject({ scored: 2, skipped: 0 });
+    const mean = Object.fromEntries(report.perceptual.cases.map((c) => [c.id, c.deltaE.mean]));
+    expect(mean["g1.jpg"]!).toBeLessThan(mean["g3.jpg"]!);
+    expect(mean["g3.jpg"]!).toBeGreaterThan(6);
+    expect(report.perceptual.cases.every((c) => c.ssim <= 1 && c.ssim > -1)).toBe(true);
+
+    const text = await cli([...args, "--perceptual"]);
+    expect(text.out).toMatch(/Look, from drawing both edits on the photo .*: within ΔE 3, the same at a glance: \d+% · within ΔE 6, close: \d+% · mean ΔE [\d.]+, median [\d.]+ · SSIM [\d.]+ \(2 scored\)/);
+
+    const plain = await cli([...args, "--json"]);
+    expect(JSON.parse(plain.stdout)).not.toHaveProperty("perceptual");
+    expect((await cli(args)).out).not.toContain("Look, from drawing");
+  });
+
   it("stops cleanly when cancelled and tells the user how to resume", async () => {
     const abort = new AbortController();
     abort.abort();
     const lines: string[] = [];
     const code = await runCli(["edit", "--folder", shoot, "--profile", profile, "--provider", "mock", "--db", path.join(root, "cancel.db"), "--job", "c"], {
-      env: {},
+      env: { VIVAH_HOME: path.join(root, "home") },
       log: (l) => lines.push(l),
       signal: abort.signal,
     });
@@ -144,7 +175,7 @@ describe("vivah CLI (mock provider)", () => {
     const abort = new AbortController();
     const lines: string[] = [];
     const running = runCli(["review", "--folder", shoot, "--profile", profile, "--db", db, "--job", "j"], {
-      env: {},
+      env: { VIVAH_HOME: path.join(root, "home") },
       log: (l) => lines.push(l),
       signal: abort.signal,
     });
@@ -152,7 +183,7 @@ describe("vivah CLI (mock provider)", () => {
       const found = lines.join("\n").match(/http:\/\/127\.0\.0\.1:\d+\/\?t=\S+/)?.[0];
       if (!found) throw new Error("server not up yet");
       return found;
-    });
+    }, { timeout: 30_000 });
     const origin = new URL(url).origin;
     const token = new URL(url).searchParams.get("t")!;
     const data = (await (await fetch(`${origin}/api/items?t=${token}`)).json()) as { items: { id: string; state: string }[] };

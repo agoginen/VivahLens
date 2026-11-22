@@ -9,14 +9,19 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
   },
   "dependencies": {
+    "@vivahlens/adapter-darktable": "*",
     "@vivahlens/adapter-lightroom": "*",
     "@vivahlens/adapter-rawtherapee": "*",
     "@vivahlens/adapter-xmp": "*",
     "@vivahlens/core": "*",
+    "@vivahlens/delivery": "*",
     "@vivahlens/ingest": "*",
-    "@vivahlens/review": "*"
+    "@vivahlens/render": "*",
+    "@vivahlens/review": "*",
+    "@vivahlens/video": "*"
   },
   "devDependencies": {
+    "@vivahlens/cloud-api": "*",
     "jpeg-js": "^0.4.4"
   }
 }

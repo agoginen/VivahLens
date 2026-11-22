@@ -29,6 +29,14 @@ function flatten(adj: RecipeAdjustments): Map<string, number> {
     const v = adj.sharpening?.[k];
     if (v !== undefined) out.set(`sharpening.${k}`, v);
   }
+  for (const k of ["amount", "midpoint", "feather", "roundness"] as const) {
+    const v = adj.vignette?.[k];
+    if (v !== undefined) out.set(`vignette.${k}`, v);
+  }
+  for (const k of ["amount", "size", "roughness"] as const) {
+    const v = adj.grain?.[k];
+    if (v !== undefined) out.set(`grain.${k}`, v);
+  }
   return out;
 }
 

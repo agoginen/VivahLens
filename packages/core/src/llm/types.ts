@@ -9,6 +9,12 @@ export interface LlmMessage {
   content: string | ContentPart[];
 }
 
+export interface JsonSchemaSpec {
+  /** Letters, digits, `_` and `-` (OpenAI's rule for schema names). */
+  name: string;
+  schema: Record<string, unknown>;
+}
+
 export interface LlmRequest {
   model: string;
   messages: LlmMessage[];
@@ -16,12 +22,23 @@ export interface LlmRequest {
   temperature?: number;
   /** Ask the provider for a JSON object where supported. */
   json?: boolean;
+  /**
+   * The shape the reply must have. Providers that can enforce a schema do; the rest fall back to plain JSON mode, so the
+   * caller still validates what comes back.
+   */
+  jsonSchema?: JsonSchemaSpec;
   signal?: AbortSignal;
 }
 
 export interface LlmUsage {
+  /** All input tokens, including any served from a cache. */
   inputTokens?: number;
+  /** All billable output tokens, including any spent on reasoning. */
   outputTokens?: number;
+  /** The part of the output that was reasoning, when the provider says so (already included in `outputTokens`). */
+  reasoningTokens?: number;
+  /** The part of the input that came from the provider's prompt cache. */
+  cachedInputTokens?: number;
 }
 
 export interface LlmResponse {
@@ -31,6 +48,8 @@ export interface LlmResponse {
 
 export interface LlmProvider {
   readonly id: string;
+  /** Runs on this computer (a loopback address): nothing sent to it leaves the machine. */
+  readonly local?: boolean;
   complete(req: LlmRequest): Promise<LlmResponse>;
 }
 
