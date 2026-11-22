@@ -1,5 +1,78 @@
+# Dependencies
 node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+
+# Build output
 dist/
-*.tsbuildinfo
-sbom*.cdx.json
 dist-sea/
+build/
+out/
+*.tsbuildinfo
+*.blob
+sbom*.cdx.json
+
+# Test and coverage output
+coverage/
+.nyc_output/
+.vite/
+.vitest/
+test-results/
+playwright-report/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.jsonl
+
+# Local data created by running the app (jobs database, sample photos, exports)
+.vivahlens/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.vivah.json
+vivah-diagnostics-*.json
+vivahlens-demo/
+vivah-sample/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+
+# Editors and IDEs
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig

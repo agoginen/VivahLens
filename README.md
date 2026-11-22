@@ -44,6 +44,83 @@ node packages/cli/dist/main.js stats --folder <raw-folder>
 
 Use a real model with `--provider openai|anthropic|gemini|azure|ollama|openai-compatible --model <id>` and the matching key in `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `VIVAH_API_KEY`. Pass `--prices prices.json --max-cost 5` to see an estimate before anything is sent and to refuse to start above a cap (with `--max-cost`, a model that has no price in the table is refused too, never assumed free).
 
+## Run it and try it (step by step)
+
+### What the pieces are
+
+There is **no hosted website and no username/password login**. What exists:
+
+| Piece | What it is | How you reach it |
+|---|---|---|
+| **CLI** (`vivah`, [packages/cli](packages/cli)) | The main program: `learn`, `edit`, `review`, `export`, `deliver`, `cut`, `doctor`... | `node packages/cli/dist/main.js <command>` |
+| **Review "website"** ([packages/review](packages/review)) | A local web page the CLI starts for the `review` command. Only on `127.0.0.1`, on a random port, behind a one-time token in the URL | The URL printed by `vivah review` |
+| **Engine** (core, ingest, render, delivery, video) | Libraries the CLI uses: styles, culling, LLM gateway, job database, renderer, finishing | Used through the CLI |
+| **Editor adapters** (xmp, rawtherapee, darktable, lightroom) | Apply edits through the editor you own; `render` needs no editor | `--adapter <name>` |
+| **Licensing server** ([packages/cloud-api](packages/cloud-api)) | Reference server for licence activation, plans and usage. It is a library with **no launcher script yet**; it is exercised by its tests | Tests, or embed `createCloudApi(...)` in your own script |
+
+### "Login" = licence activation
+
+- **Development build (what `npm run build` gives you): no login at all.** `vivah doctor` says the licence is "not enforced" and every command works. This is the normal way to test.
+- A licence is only enforced when `VIVAH_LICENSE_PUBLIC_KEY` is set. Then bind the computer with `vivah activate --server <url> --key <license key>`, check it with `vivah license`, free it with `vivah deactivate`.
+- There is no sign-up page. Accounts and keys are created through the server's admin API (`POST /admin/v1/accounts`, `POST /admin/v1/licenses`, `PUT /admin/v1/accounts/<id>/subscription`), shown in `packages/cloud-api/src/api.test.ts`.
+- The review page has no login either: the `?t=<token>` in its URL is the credential, and it changes on every run. A URL without it gets HTTP 401.
+
+### 1. Install and build
+
+```powershell
+npm install
+npm run build
+node packages/cli/dist/main.js doctor     # "Ready" is enough; the missing editors and API key are optional
+```
+
+### 2. Fastest look at the website (made-up photos)
+
+```powershell
+node scripts/review-demo.mjs
+```
+
+It prints `Review page: http://127.0.0.1:<port>/?t=<token>`; open that exact URL. Stop with Ctrl-C.
+
+### 3. Full offline run with your own photos (no API key, nothing sent anywhere)
+
+Use a folder of finished JPEGs as `refs` and a folder of photos to edit as `shoot`. Work on copies: the `render` adapter writes next to the photos (`*.vivah.json`) and `xmp` writes `.xmp` sidecars; `vivah undo` removes them again.
+
+```powershell
+$env:VIVAH_HOME = "$env:TEMP\vivah-home"      # optional: keep test data out of ~/.vivahlens
+node packages/cli/dist/main.js learn  --refs C:\demo\refs --name Warm --out C:\demo\warm.profile.json --provider mock
+node packages/cli/dist/main.js edit   --folder C:\demo\shoot --profile C:\demo\warm.profile.json --provider mock --adapter render
+node packages/cli/dist/main.js review --folder C:\demo\shoot --profile C:\demo\warm.profile.json --adapter render --export-dir C:\demo\export
+```
+
+`review` prints `Review UI (local only): http://127.0.0.1:<port>/?t=<token>`. Open it in a browser (keep the command running). In the page: **Approve** or **Flag for retouch** per photo, click a photo to adjust sliders and see before/after, then **Submit decisions** to export approved photos into `--export-dir`. Language (English / Hindi) is in the header; press `?` for keyboard shortcuts.
+
+Expected: `edit` ends with `Job "shoot": N ready for review, M culled, 0 failed` (blurry frames and near-duplicates are culled); the page's tabs show To review / Approved / Set aside / Failed / Retouch counts.
+
+Afterwards:
+
+```powershell
+node packages/cli/dist/main.js stats   --folder C:\demo\shoot      # acceptance rate
+node packages/cli/dist/main.js deliver --folder C:\demo\export --out C:\demo\client --copyright "© 2026 Me" --zip
+node packages/cli/dist/main.js undo    --folder C:\demo\shoot      # take the edits back out
+```
+
+With a real model instead of `mock`: set `OPENAI_API_KEY` (or the other keys above) and pass `--provider openai --model <id>`.
+
+### 4. Run the automated tests
+
+```powershell
+npm test                                   # everything (build first so the CLI tests run)
+npx vitest run packages/cli                # one package
+npx vitest run packages/cloud-api          # the licensing server
+npm run ci                                 # build + tests + licence gate
+```
+
+### 5. Quick checks that it is working
+
+- `vivah doctor` exits 0.
+- The review URL returns 200 with its token and 401 without it: `curl.exe -i "http://127.0.0.1:<port>/"` should say 401.
+- Nothing needs to be installed for `render`/`xmp` + `mock`. RawTherapee, darktable, Lightroom, ffmpeg (video) and a real LLM key are optional and, per the status note above, untested against the real programs.
+
 ### One executable
 
 ```powershell
