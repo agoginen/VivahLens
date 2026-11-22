@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkReadable,
+  InFlightJobs,
   jobBackupDir,
   runProcess,
   throwIfCancelled,
@@ -89,7 +90,7 @@ export class DarktableAdapter implements EditorAdapter {
   private version: string | undefined;
   /** darktable-cli is heavy and keeps its settings in one folder, so exports run one at a time. */
   private queue: Promise<unknown> = Promise.resolve();
-  private readonly running = new Map<string, Set<AbortController>>();
+  private readonly running = new InFlightJobs();
 
   constructor(opts: DarktableOptions = {}) {
     this.binary = opts.binary ?? "darktable-cli";
@@ -120,9 +121,9 @@ export class DarktableAdapter implements EditorAdapter {
     };
   }
 
-  /** Stops the exports in flight for a job: their processes are killed and the partial files removed. */
+  /** Stops the exports of a job: those waiting their turn never start, and the processes already started are killed and their partial files removed. */
   async cancel(jobId: string): Promise<void> {
-    for (const controller of this.running.get(jobId) ?? []) controller.abort();
+    this.running.cancel(jobId);
   }
 
   /** Refuses an installed darktable whose parameter layouts differ from the ones written here. A version not yet detected is not refused. */
@@ -152,13 +153,15 @@ export class DarktableAdapter implements EditorAdapter {
   }
 
   export(asset: AssetRef, spec: ExportSpec, ctx?: AdapterContext): Promise<ExportResult> {
-    const work = this.queue.then(() => this.exportOne(asset, spec, ctx));
+    // Entered now rather than when its turn comes, so a cancel while it waits behind another export is not lost.
+    const job = this.running.enter(ctx);
+    const work = this.queue.then(() => this.exportOne(asset, spec, job.signal)).finally(job.release);
     this.queue = work.catch(() => undefined);
     return work;
   }
 
-  private async exportOne(asset: AssetRef, spec: ExportSpec, ctx?: AdapterContext): Promise<ExportResult> {
-    throwIfCancelled(ctx);
+  private async exportOne(asset: AssetRef, spec: ExportSpec, signal: AbortSignal): Promise<ExportResult> {
+    throwIfCancelled({ signal });
     this.assertSupportedVersion();
     await fs.mkdir(spec.outputDir, { recursive: true });
     await fs.mkdir(this.configDir, { recursive: true });
@@ -189,25 +192,15 @@ export class DarktableAdapter implements EditorAdapter {
       "plugins/imageio/storage/disk/overwrite=1",
     ];
 
-    const controller = new AbortController();
-    const key = ctx?.jobId ?? "";
-    this.running.set(key, (this.running.get(key) ?? new Set()).add(controller));
-    const onAbort = () => controller.abort();
-    ctx?.signal?.addEventListener("abort", onAbort, { once: true });
-    let res;
-    try {
-      res = await this.run(this.binary, args, { signal: controller.signal });
-    } finally {
-      ctx?.signal?.removeEventListener("abort", onAbort);
-      this.running.get(key)?.delete(controller);
-      if (this.running.get(key)?.size === 0) this.running.delete(key);
-    }
+    // A cancel that came while this was being prepared must not start darktable-cli.
+    throwIfCancelled({ signal });
+    const res = await this.run(this.binary, args, { signal });
 
     // darktable-cli exits 1 for every failure and may exit 0 without a file (a skipped output): trust neither without the image.
-    const wrote = res.code === 0 && !controller.signal.aborted && (await looksLikeImage(out, spec.format));
+    const wrote = res.code === 0 && !signal.aborted && (await looksLikeImage(out, spec.format));
     if (!wrote) {
       await fs.rm(out, { force: true }).catch(() => undefined);
-      if (controller.signal.aborted) throw new VivahError("ADAPTER_CANCELLED", `Export of ${path.basename(asset.path)} was cancelled`);
+      if (signal.aborted) throw new VivahError("ADAPTER_CANCELLED", `Export of ${path.basename(asset.path)} was cancelled`);
       throw new VivahError("ADAPTER_APPLY_FAILED", res.code === 0 ? `darktable-cli finished without writing a usable ${path.basename(out)}` : `darktable-cli exited with ${res.code}: ${res.stderr.slice(0, 300)}`);
     }
     return { assetId: asset.id, file: out };

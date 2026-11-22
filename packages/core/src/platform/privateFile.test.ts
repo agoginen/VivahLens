@@ -68,14 +68,19 @@ describe("access lists", () => {
     await expect(currentUserSid(scriptedRunner([{ when: () => true, reply: { code: 1 } }]).run)).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED" });
   });
 
-  it("restricts a file with the numeric SID in one icacls call, and a folder so what is made in it inherits only that", async () => {
+  it("resets a file's list and then restricts it with the numeric SID, and does the same for a folder so what is made in it inherits only that", async () => {
     const { run, calls } = scriptedRunner([whoami, { when: (c) => isIcacls(c), reply: {} }]);
     await restrictToCurrentUser("C:\\data\\license.json", { run });
     await restrictToCurrentUser("C:\\data", { run, folder: true });
-    const icacls = calls.filter((c) => isIcacls(c.command));
-    expect(icacls[0]!.args).toEqual(["C:\\data\\license.json", "/inheritance:r", "/grant:r", `*${SID}:F`, "/Q"]);
-    expect(icacls[1]!.args).toEqual(["C:\\data", "/inheritance:r", "/grant:r", `*${SID}:(OI)(CI)F`, "/Q"]);
+    expect(calls.filter((c) => isIcacls(c.command)).map((c) => c.args)).toEqual([
+      ["C:\\data\\license.json", "/reset", "/Q"],
+      ["C:\\data\\license.json", "/inheritance:r", "/grant:r", `*${SID}:F`, "/Q"],
+      ["C:\\data", "/reset", "/Q"],
+      ["C:\\data", "/inheritance:r", "/grant:r", `*${SID}:(OI)(CI)F`, "/Q"],
+    ]);
     await expect(restrictToCurrentUser("x", { run: scriptedRunner([whoami, { when: (c) => isIcacls(c), reply: { code: 5, stderr: "Access is denied." } }]).run })).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED", message: expect.stringContaining("Access is denied.") });
+    const secondFails = scriptedRunner([whoami, { when: (_c, args) => args.includes("/inheritance:r"), reply: { code: 5, stderr: "Not enough rights." } }, { when: (c) => isIcacls(c), reply: {} }]);
+    await expect(restrictToCurrentUser("x", { run: secondFails.run })).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED", message: expect.stringContaining("Not enough rights.") });
   });
 });
 
@@ -96,7 +101,7 @@ describe("writing a private file with a fake icacls", () => {
     const { run, calls } = scriptedRunner([whoami, icaclsThatSaves(`D:P(A;;FA;;;${SID})`)]);
     await writePrivateFile(file, '{"token":"s3cret"}', { run, platform: "win32" });
     expect(readFileSync(file, "utf8")).toBe('{"token":"s3cret"}');
-    expect(calls.map((c) => (isIcacls(c.command) ? c.args[1] : "whoami"))).toEqual(["whoami", "/inheritance:r", "/save"]);
+    expect(calls.map((c) => (isIcacls(c.command) ? c.args[1] : "whoami"))).toEqual(["whoami", "/reset", "/inheritance:r", "/save"]);
     expect(readdirSync(dir)).toEqual(["license.json"]);
   });
 
@@ -128,12 +133,15 @@ describe("writing a private file with a fake icacls", () => {
     expect(readFileSync(file, "utf8")).toBe("s3cret");
   });
 
-  it("says which accounts it found when it refuses, without the part of a SID that identifies the computer or domain", async () => {
+  it("says which accounts it found when it refuses, without the numbers that identify a person or a computer", async () => {
     const dir = temp();
-    const { run } = scriptedRunner([whoami, icaclsThatSaves(`D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(D;;FA;;;S-1-5-21-1-2-3-1001)(A;ID;FA;;;${SID})`)]);
+    const { run } = scriptedRunner([whoami, icaclsThatSaves(`D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(D;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;S-1-5-5-0-14554954)(A;ID;FA;;;${SID})`)]);
     const refused = writePrivateFile(path.join(dir, "license.json"), "s3cret", { run, platform: "win32" });
-    await expect(refused).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED", message: expect.stringContaining("(found: SY, BA, a deny for S-1-5-21-…-1001, S-1-12-1-…-4444444444)") });
-    await expect(refused).rejects.not.toMatchObject({ message: expect.stringContaining("2222222222") });
+    // A computer's own account keeps its small RID; a work or school account and a logon session keep only what kind they are.
+    await expect(refused).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED", message: expect.stringContaining("(found: SY, BA, a deny for S-1-5-21-…-1001, S-1-5-5-…, S-1-12-1-…)") });
+    for (const identifying of ["1111111111", "2222222222", "3333333333", "4444444444", "14554954"]) {
+      await expect(refused).rejects.not.toMatchObject({ message: expect.stringContaining(identifying) });
+    }
   });
 });
 
@@ -151,6 +159,19 @@ describe.skipIf(process.platform !== "win32")("private files on Windows, with th
     const ordinary = path.join(dir, "ordinary.txt");
     writeFileSync(ordinary, "x");
     expect(await isCurrentUserOnly(ordinary)).toBe(false);
+  }, 30_000);
+
+  it("restricts a file made where its folder hands nothing down, which starts with the creating account's default entries (SYSTEM, and Administrators for an elevated process)", async () => {
+    const dir = temp();
+    const sid = await currentUserSid();
+    // A folder whose one entry is not inherited: a new file there gets the process's default access list, as on a build server.
+    const set = await nodeRunner(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "icacls.exe"), [dir, "/inheritance:r", "/grant:r", `*${sid}:F`, "/Q"]);
+    expect(set.code).toBe(0);
+    const file = path.join(dir, "secret.json");
+    await writePrivateFile(file, "s3cret");
+    expect(readFileSync(file, "utf8")).toBe("s3cret");
+    expect(await isCurrentUserOnly(file)).toBe(true);
+    expect(readdirSync(dir)).toEqual(["secret.json"]);
   }, 30_000);
 
   it("makes a folder whose new files are born restricted, is idempotent, and refuses a folder it did not make that others can open", async () => {

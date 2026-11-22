@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -193,6 +194,31 @@ describe("RawTherapeeAdapter safety", () => {
     await expect(cancelled).rejects.toMatchObject({ code: "ADAPTER_CANCELLED" });
     await expect(other).resolves.toMatchObject({ file: path.join(dir, "out2", "two.jpg") });
     expect(existsSync(path.join(dir, "out2", "one.jpg"))).toBe(false);
+  });
+
+  it.each(["cancel", "signal"] as const)("does not lose a %s that comes right after the export began, and never starts rawtherapee-cli for it", async (how) => {
+    const asset = { id: "early", kind: "photo" as const, path: path.join(dir, "IMG_13.NEF") };
+    const calls: (readonly string[])[] = [];
+    const adapter = new RawTherapeeAdapter({ run: writingRun(calls) });
+    const abort = new AbortController();
+
+    // The export has run as far as its first wait (making the output folder) and has not started rawtherapee-cli.
+    const exporting = adapter.export(asset, { format: "jpeg", outputDir: path.join(dir, `out-early-${how}`) }, { jobId: "job-4", signal: abort.signal });
+    if (how === "cancel") await adapter.cancel("job-4");
+    else abort.abort();
+
+    await expect(exporting).rejects.toMatchObject({ code: "ADAPTER_CANCELLED" });
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves nothing attached to the job's signal once its exports have ended, however they ended", async () => {
+    const asset = { id: "listeners", kind: "photo" as const, path: path.join(dir, "IMG_14.NEF") };
+    const abort = new AbortController();
+    const ctx = { jobId: "job-5", signal: abort.signal };
+    await new RawTherapeeAdapter({ run: writingRun() }).export(asset, { format: "jpeg", outputDir: path.join(dir, "out-listeners") }, ctx);
+    const failing: ProcessRunner = async () => ({ code: 3, stdout: "", stderr: "disk error" });
+    await expect(new RawTherapeeAdapter({ run: failing }).export(asset, { format: "jpeg", outputDir: path.join(dir, "out-listeners"), fileName: "two" }, ctx)).rejects.toMatchObject({ code: "ADAPTER_APPLY_FAILED" });
+    expect(getEventListeners(abort.signal, "abort")).toHaveLength(0);
   });
 
   it("removes the partial file when the process fails", async () => {

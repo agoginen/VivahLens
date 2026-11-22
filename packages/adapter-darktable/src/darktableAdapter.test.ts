@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, promises as fs, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { AssetRef, EditRecipe, ProcessRunner } from "@vivahlens/core";
 import { DarktableAdapter, sidecarPath } from "./darktableAdapter.js";
 import { readExposure } from "./params.js";
@@ -271,12 +272,60 @@ describe("exporting", () => {
     const f = fakeDarktable({ exportMs: 2000 });
     const adapter = new DarktableAdapter({ run: f.run, configDir: path.join(dir, "c") });
     const running = adapter.export(asset, spec(dir), { jobId: "job-x" });
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(f.calls.some((call) => call.args[0] === asset.path)).toBe(true), { timeout: 15_000 });
     await adapter.cancel("job-x");
     await expect(running).rejects.toMatchObject({ code: "ADAPTER_CANCELLED" });
     expect(existsSync(path.join(dir, "out", "IMG_0412.jpg"))).toBe(false);
     // A job that is not running is not affected.
     await expect(adapter.cancel("nothing")).resolves.toBeUndefined();
+  });
+
+  it("does not lose a cancel that comes while an export is still waiting its turn, and never starts darktable-cli for it", async () => {
+    const dir = workspace();
+    const f = fakeDarktable({ exportMs: 100 });
+    const adapter = new DarktableAdapter({ run: f.run, configDir: path.join(dir, "c") });
+    const ahead = adapter.export(raw(dir, "IMG_1.CR3"), spec(dir), { jobId: "job-a" });
+    const waiting = adapter.export(raw(dir, "IMG_2.CR3"), spec(dir), { jobId: "job-b" });
+    await adapter.cancel("job-b");
+    await expect(waiting).rejects.toMatchObject({ code: "ADAPTER_CANCELLED" });
+    await expect(ahead).resolves.toMatchObject({ file: path.join(dir, "out", "IMG_1.jpg") });
+    expect(f.calls.map((call) => path.basename(call.args[0]!))).toEqual(["IMG_1.CR3"]);
+    expect(existsSync(path.join(dir, "out", "IMG_2.jpg"))).toBe(false);
+  });
+
+  it.each(["cancel", "signal"] as const)("does not lose a %s that comes while the export is being prepared, and never starts darktable-cli for it", async (how) => {
+    const dir = workspace();
+    const f = fakeDarktable({ exportMs: 100 });
+    const adapter = new DarktableAdapter({ run: f.run, configDir: path.join(dir, "c") });
+    const abort = new AbortController();
+    // Runs when the adapter first makes the output folder: it has begun the export and has not yet started darktable-cli.
+    const outputDir = path.join(dir, "out");
+    const realMkdir = fs.mkdir;
+    let hit = false;
+    const hook = vi.spyOn(fs, "mkdir").mockImplementation((async (target: string, options: never) => {
+      if (target === outputDir && !hit) {
+        hit = true;
+        if (how === "cancel") await adapter.cancel("job-x");
+        else abort.abort();
+      }
+      return realMkdir.call(fs, target, options);
+    }) as never);
+    try {
+      await expect(adapter.export(raw(dir), spec(dir), { jobId: "job-x", signal: abort.signal })).rejects.toMatchObject({ code: "ADAPTER_CANCELLED" });
+    } finally {
+      hook.mockRestore();
+    }
+    expect(hit).toBe(true);
+    expect(f.calls).toEqual([]);
+  });
+
+  it("leaves nothing attached to the job's signal once its exports have ended, however they ended", async () => {
+    const dir = workspace();
+    const abort = new AbortController();
+    const ctx = { jobId: "job-s", signal: abort.signal };
+    await new DarktableAdapter({ run: fakeDarktable().run, configDir: path.join(dir, "c") }).export(raw(dir), spec(dir), ctx);
+    await expect(new DarktableAdapter({ run: fakeDarktable({ exit: 1 }).run, configDir: path.join(dir, "c") }).export(raw(dir), spec(dir), ctx)).rejects.toMatchObject({ code: "ADAPTER_APPLY_FAILED" });
+    expect(getEventListeners(abort.signal, "abort")).toHaveLength(0);
   });
 
   it("stays in the folder it was given, whatever file name it is asked for", async () => {

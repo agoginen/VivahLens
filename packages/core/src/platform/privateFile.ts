@@ -31,13 +31,21 @@ export const forgetUserSid = (): void => {
   cachedSid = undefined;
 };
 
-/** Makes a file, or with `inherit` a folder and what is created in it later, accessible to the current user only. */
+/** Makes a file, or with `folder` a folder and what is created in it later, accessible to the current user only. */
 export async function restrictToCurrentUser(target: string, opts: { run?: Runner; folder?: boolean } = {}): Promise<void> {
   const run = opts.run ?? nodeRunner;
   const sid = await currentUserSid(run);
+  const icacls = path.join(system32(), "icacls.exe");
+  const failed = (res: Awaited<ReturnType<Runner>>) =>
+    new VivahError("FILE_PROTECTION_FAILED", `Could not restrict ${path.basename(target)} to your account: ${res.stderr.slice(0, 200) || res.startError || `icacls exited ${res.code}`}`);
+  // Taking away what is inherited is not enough. A file made where its folder hands nothing down starts with the creating
+  // account's own default entries (SYSTEM, and the Administrators group for an elevated process); those are explicit, so
+  // they would stay. Resetting first turns every entry into an inherited one, which the next call then removes.
+  const reset = await run(icacls, [target, "/reset", "/Q"], { timeoutMs: 20_000 });
+  if (reset.code !== 0) throw failed(reset);
   const grant = opts.folder ? `*${sid}:(OI)(CI)F` : `*${sid}:F`;
-  const res = await run(path.join(system32(), "icacls.exe"), [target, "/inheritance:r", "/grant:r", grant, "/Q"], { timeoutMs: 20_000 });
-  if (res.code !== 0) throw new VivahError("FILE_PROTECTION_FAILED", `Could not restrict ${path.basename(target)} to your account: ${res.stderr.slice(0, 200) || res.startError || `icacls exited ${res.code}`}`);
+  const res = await run(icacls, [target, "/inheritance:r", "/grant:r", grant, "/Q"], { timeoutMs: 20_000 });
+  if (res.code !== 0) throw failed(res);
 }
 
 /** The allowed-access entries of an access list in SDDL form, e.g. `D:PAI(A;;FA;;;S-1-5-21-1)`. */
@@ -69,11 +77,15 @@ export function isOwnerOnly(sddl: string, sid: string): boolean {
   return aces.length > 0 && aces.every((a) => a.type === "A" && isAccount(a.trustee, sid));
 }
 
-/** The accounts in an access list, for saying what was found: a SID loses the part that identifies the computer or domain. */
+/** The accounts in an access list, for saying what was found. A SID is cut down to what does not identify a person or a computer. */
 function describeAccess(sddl: string): string {
   const shorten = (trustee: string) => {
     const parts = trustee.split("-");
-    return parts.length > 5 ? `${parts.slice(0, 4).join("-")}-…-${parts.at(-1)}` : trustee;
+    if (parts.length <= 5) return trustee;
+    const start = parts.slice(0, 4).join("-");
+    // The last number of a computer's or domain's own account is its small RID (500, 1001), which says what kind of account it
+    // is. For any other SID (work and school accounts, logon sessions) the numbers are part of what identifies someone.
+    return parts[2] === "5" && parts[3] === "21" ? `${start}-…-${parts.at(-1)}` : `${start}-…`;
   };
   const found = parseAces(sddl).map((a) => `${a.type === "A" ? "" : "a deny for "}${shorten(a.trustee)}`);
   return found.length > 0 ? found.join(", ") : "no entries";

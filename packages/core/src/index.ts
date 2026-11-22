@@ -1,6 +1,7 @@
 export * from "./errors.js";
 export * from "./recipe/editRecipe.js";
 export * from "./adapters/editorAdapter.js";
+export * from "./adapters/inFlight.js";
 export * from "./adapters/processRunner.js";
 export * from "./adapters/progress.js";
 export * from "./adapters/pluginBridge.js";

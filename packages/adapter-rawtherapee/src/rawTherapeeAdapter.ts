@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkReadable,
+  InFlightJobs,
   jobBackupDir,
   runProcess,
   throwIfCancelled,
@@ -51,8 +52,8 @@ export class RawTherapeeAdapter implements EditorAdapter {
   private readonly binary: string;
   private readonly run: ProcessRunner;
   private readonly backupDir: string | undefined;
-  /** Controllers of the exports running per job, so a cancel reaches the processes already started. */
-  private readonly running = new Map<string, Set<AbortController>>();
+  /** The exports of each job, so a cancel reaches one that is still being prepared as well as one whose process has started. */
+  private readonly running = new InFlightJobs();
 
   constructor(opts: RawTherapeeOptions = {}) {
     this.binary = opts.binary ?? "rawtherapee-cli";
@@ -77,9 +78,9 @@ export class RawTherapeeAdapter implements EditorAdapter {
     return { kind: "pp3", payload: pp3, unsupported: unsupportedFields(recipe, SUPPORTED_FIELDS), ...(warnings.length && { warnings }) };
   }
 
-  /** Stops the exports in flight for a job: their processes are killed and the partial files removed. */
+  /** Stops the exports of a job: those not yet started never start, and the processes already started are killed and their partial files removed. */
   async cancel(jobId: string): Promise<void> {
-    for (const controller of this.running.get(jobId) ?? []) controller.abort();
+    this.running.cancel(jobId);
   }
 
   async applyRecipe(asset: AssetRef, recipe: EditRecipe, ctx?: AdapterContext): Promise<ApplyResult> {
@@ -93,7 +94,17 @@ export class RawTherapeeAdapter implements EditorAdapter {
   }
 
   async export(asset: AssetRef, spec: ExportSpec, ctx?: AdapterContext): Promise<ExportResult> {
-    throwIfCancelled(ctx);
+    // Entered before the first wait, so a cancel that comes while the export is being prepared is not lost.
+    const job = this.running.enter(ctx);
+    try {
+      return await this.exportOne(asset, spec, job.signal);
+    } finally {
+      job.release();
+    }
+  }
+
+  private async exportOne(asset: AssetRef, spec: ExportSpec, signal: AbortSignal): Promise<ExportResult> {
+    throwIfCancelled({ signal });
     await fs.mkdir(spec.outputDir, { recursive: true });
     const ext = spec.format === "tiff" ? "tif" : "jpg";
     const out = path.join(spec.outputDir, `${path.basename(spec.fileName ?? path.parse(asset.path).name)}.${ext}`);
@@ -110,25 +121,15 @@ export class RawTherapeeAdapter implements EditorAdapter {
       // -c must be the last option; -Y overwrites an existing output; -js3 is passed because the CLI's usage text and code disagree on its default.
       const args = ["-q", "-Y", "-o", out, ...profiles.flatMap((p) => ["-p", p]), spec.format === "tiff" ? "-t" : `-j${spec.quality ?? 92}`, ...(spec.format === "tiff" ? [] : ["-js3"]), "-c", asset.path];
 
-      const controller = new AbortController();
-      const key = ctx?.jobId ?? "";
-      this.running.set(key, (this.running.get(key) ?? new Set()).add(controller));
-      const onAbort = () => controller.abort();
-      ctx?.signal?.addEventListener("abort", onAbort, { once: true });
-      let res;
-      try {
-        res = await this.run(this.binary, args, { signal: controller.signal });
-      } finally {
-        ctx?.signal?.removeEventListener("abort", onAbort);
-        this.running.get(key)?.delete(controller);
-        if (this.running.get(key)?.size === 0) this.running.delete(key);
-      }
+      // A cancel that came while this was being prepared must not start rawtherapee-cli.
+      throwIfCancelled({ signal });
+      const res = await this.run(this.binary, args, { signal });
       // A skipped output still exits 0 and an unknown option exits with a negative code: trust neither without the file.
-      const wrote = res.code === 0 && !controller.signal.aborted && (await fs.stat(out).then((s) => s.size > 0, () => false));
+      const wrote = res.code === 0 && !signal.aborted && (await fs.stat(out).then((s) => s.size > 0, () => false));
       if (!wrote) {
         // A half-written image must never be left where it could be mistaken for a finished one.
         await fs.rm(out, { force: true }).catch(() => undefined);
-        if (controller.signal.aborted) throw new VivahError("ADAPTER_CANCELLED", `Export of ${path.basename(asset.path)} was cancelled`);
+        if (signal.aborted) throw new VivahError("ADAPTER_CANCELLED", `Export of ${path.basename(asset.path)} was cancelled`);
         throw new VivahError("ADAPTER_APPLY_FAILED", res.code === 0 ? `rawtherapee-cli finished without writing ${path.basename(out)}` : `rawtherapee-cli exited with ${res.code}: ${res.stderr.slice(0, 300)}`);
       }
       return { assetId: asset.id, file: out };
