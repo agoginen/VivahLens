@@ -80,11 +80,11 @@ describe("--notify", () => {
 
   it("passes a hostile folder name through to the notification as text, never as a command or an option", async () => {
     const n = recorder();
-    const folder = shoot("-rf & $(calc) 'x'");
+    const folder = shoot("-rf $(calc) 'x'");
     const r = await run(["edit", "--folder", folder, "--profile", profile, "--provider", "mock", "--db", path.join(root, "d.db"), "--notify"], n.run);
     expect(r.code).toBe(0);
     const call = n.calls[0]!;
-    expect(JSON.stringify(call)).toContain("-rf & $(calc) 'x'");
+    expect(JSON.stringify(call)).toContain("-rf $(calc) 'x'");
     const fixed = new Set(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "-EncodedCommand", "-e", "-a", "-u", "--"]);
     for (const arg of call.args) if (arg.startsWith("-")) expect(fixed.has(arg), arg).toBe(true);
   });

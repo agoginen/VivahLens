@@ -33,6 +33,29 @@ describe("access lists", () => {
     expect(isOwnerOnly("", SID)).toBe(false);
   });
 
+  it("accepts the short names SDDL uses for a few accounts when they are this user, and only then", () => {
+    const administrator = "S-1-5-21-1-2-3-500";
+    // The built-in Administrator is written LA and the guest account LG, not as a SID, and the service accounts likewise.
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LA)", administrator)).toBe(true);
+    expect(isOwnerOnly(`D:P(A;;FA;;;LA)(A;;FA;;;${administrator})`, administrator)).toBe(true);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LG)", "S-1-5-21-1-2-3-501")).toBe(true);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;SY)", "S-1-5-18")).toBe(true);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LS)", "S-1-5-19")).toBe(true);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;NS)", "S-1-5-20")).toBe(true);
+
+    // Never for a different account, never for a group, and never for a name that is not a SID or an alias at all.
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LA)", "S-1-5-21-1-2-3-1001")).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LA)", SID)).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LG)", administrator)).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;SY)", SID)).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;LS)", "S-1-5-20")).toBe(false);
+    expect(isOwnerOnly("D:P(A;;FA;;;LA)(A;;FA;;;BA)", administrator)).toBe(false);
+    expect(isOwnerOnly("D:P(A;;FA;;;LA)(A;;FA;;;SY)", administrator)).toBe(false);
+    expect(isOwnerOnly("D:P(A;;FA;;;LA)(A;;FR;;;WD)", administrator)).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;constructor)", administrator)).toBe(false);
+    expect(isOwnerOnly("D:PAI(A;;FA;;;__proto__)", administrator)).toBe(false);
+  });
+
   it("finds the account's SID, remembers it, and refuses to guess when it cannot", async () => {
     const { run, calls } = scriptedRunner([whoami]);
     expect(await currentUserSid(run)).toBe(SID);
@@ -94,6 +117,23 @@ describe("writing a private file with a fake icacls", () => {
     await writePrivateFile(file, "one", { run, platform: "win32" });
     await writePrivateFile(file, "two", { run, platform: "win32" });
     expect(readFileSync(file, "utf8")).toBe("two");
+  });
+
+  it("accepts a file icacls reports as LA when the user is the built-in Administrator, as on a build server", async () => {
+    const dir = temp();
+    const file = path.join(dir, "license.json");
+    const asAdministrator: ScriptedStep = { when: (c) => c.toLowerCase().endsWith("whoami.exe"), reply: { stdout: Buffer.from('"host\\runneradmin","S-1-5-21-1-2-3-500"\r\n') } };
+    const { run } = scriptedRunner([asAdministrator, icaclsThatSaves("D:PAI(A;;FA;;;LA)")]);
+    await writePrivateFile(file, "s3cret", { run, platform: "win32" });
+    expect(readFileSync(file, "utf8")).toBe("s3cret");
+  });
+
+  it("says which accounts it found when it refuses, without the part of a SID that identifies the computer or domain", async () => {
+    const dir = temp();
+    const { run } = scriptedRunner([whoami, icaclsThatSaves(`D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(D;;FA;;;S-1-5-21-1-2-3-1001)(A;ID;FA;;;${SID})`)]);
+    const refused = writePrivateFile(path.join(dir, "license.json"), "s3cret", { run, platform: "win32" });
+    await expect(refused).rejects.toMatchObject({ code: "FILE_PROTECTION_FAILED", message: expect.stringContaining("(found: SY, BA, a deny for S-1-5-21-…-1001, S-1-12-1-…-4444444444)") });
+    await expect(refused).rejects.not.toMatchObject({ message: expect.stringContaining("2222222222") });
   });
 });
 

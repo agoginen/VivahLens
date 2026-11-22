@@ -169,7 +169,7 @@ describe("applying a recipe", () => {
 
   it("shows the sidecar a recipe turns into without writing it, and what it ignores", () => {
     const adapter = new DarktableAdapter({ run: fakeDarktable().run });
-    const native = adapter.translateRecipe(recipe({ exposure: 0.35, contrast: 10 }), { id: "a", kind: "photo", path: "D:\\shoot\\IMG_9.CR3" });
+    const native = adapter.translateRecipe(recipe({ exposure: 0.35, contrast: 10 }), { id: "a", kind: "photo", path: path.join(root, "shoot", "IMG_9.CR3") });
     expect(native.kind).toBe("darktable-xmp");
     expect(native.unsupported).toEqual(["contrast"]);
     expect(String(native.payload)).toContain('xmpMM:DerivedFrom="IMG_9.CR3"');

@@ -107,7 +107,8 @@ describe("the structured log of a run", () => {
     logger.records.length = 0;
     await exportApproved(deps, "j5", [asset("a"), asset("b")], { approve: ["a"], exportSpec: { format: "jpeg", outputDir: "C:\\Users\\Jane Doe\\out" } });
     expect(logger.records.map((r) => r.event)).toEqual(["item.done", "review-decision"]);
-    expect(logger.records[0]).toMatchObject({ stage: "exported", assetId: "a", outcome: "exported", overridden: false, adapter: "fake-editor", file: "~\\out\\a.jpg" });
+    // The fake adapter joins the folder and the name with this system's separator.
+    expect(logger.records[0]).toMatchObject({ stage: "exported", assetId: "a", outcome: "exported", overridden: false, adapter: "fake-editor", file: `~${path.join("\\out", "a.jpg")}` });
     expect(logger.records[1]).toMatchObject({ jobId: "j5", approved: 0, exported: 1 });
   });
 

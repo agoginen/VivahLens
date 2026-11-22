@@ -49,25 +49,55 @@ export function parseAces(sddl: string): { type: string; flags: string; rights: 
   return [...dacl.matchAll(/\(([A-Z]+);([A-Z]*);([A-Za-z0-9]*);[^;]*;[^;]*;([^)]+)\)/g)].map((m) => ({ type: m[1]!, flags: m[2]!, rights: m[3]!, trustee: m[4]! }));
 }
 
-/** True when the access list has exactly allow entries for this SID and nothing else (no SYSTEM, administrators or groups). */
-export function isOwnerOnly(sddl: string, sid: string): boolean {
-  const aces = parseAces(sddl);
-  return aces.length > 0 && aces.every((a) => a.type === "A" && a.trustee === sid);
+/** The accounts SDDL writes as a short name rather than a SID, for when the program is running as one of them. */
+const ALIAS_SIDS: Readonly<Record<string, string>> = { SY: "S-1-5-18", LS: "S-1-5-19", NS: "S-1-5-20" };
+
+/** Whether an access-list trustee (a SID, or one of SDDL's short names) is the account with this SID. */
+function isAccount(trustee: string, sid: string): boolean {
+  if (trustee === sid) return true;
+  if (Object.hasOwn(ALIAS_SIDS, trustee)) return ALIAS_SIDS[trustee] === sid;
+  // The built-in local Administrator and Guest are written LA and LG, not as the machine's SID plus 500 or 501. A computer
+  // whose user is that Administrator (a build server, say) would otherwise never see its own locked-down files as private.
+  if (trustee === "LA") return /^S-1-5-21(?:-\d+){3}-500$/.test(sid);
+  if (trustee === "LG") return /^S-1-5-21(?:-\d+){3}-501$/.test(sid);
+  return false;
 }
 
-/** Reads a file's access list with `icacls /save` and checks it grants this user and no one else. */
-export async function isCurrentUserOnly(target: string, run: Runner = nodeRunner): Promise<boolean> {
+/** True when the access list has exactly allow entries for this account and nothing else (no SYSTEM, administrators or groups). */
+export function isOwnerOnly(sddl: string, sid: string): boolean {
+  const aces = parseAces(sddl);
+  return aces.length > 0 && aces.every((a) => a.type === "A" && isAccount(a.trustee, sid));
+}
+
+/** The accounts in an access list, for saying what was found: a SID loses the part that identifies the computer or domain. */
+function describeAccess(sddl: string): string {
+  const shorten = (trustee: string) => {
+    const parts = trustee.split("-");
+    return parts.length > 5 ? `${parts.slice(0, 4).join("-")}-…-${parts.at(-1)}` : trustee;
+  };
+  const found = parseAces(sddl).map((a) => `${a.type === "A" ? "" : "a deny for "}${shorten(a.trustee)}`);
+  return found.length > 0 ? found.join(", ") : "no entries";
+}
+
+/** Reads a file's access list with `icacls /save`: whether it grants this user and no one else, and who it does grant. */
+async function inspectAccess(target: string, run: Runner): Promise<{ private: boolean; found: string }> {
   const sid = await currentUserSid(run);
   const scratch = path.join(os.tmpdir(), `vivah-acl-${randomBytes(6).toString("hex")}.txt`);
   try {
     const res = await run(path.join(system32(), "icacls.exe"), [target, "/save", scratch, "/Q"], { timeoutMs: 20_000 });
-    if (res.code !== 0) return false;
+    if (res.code !== 0) return { private: false, found: `icacls exited ${res.code}` };
     const saved = (await fs.readFile(scratch)).toString("utf16le").replace(/^\uFEFF/, "");
     const sddl = saved.split(/\r?\n/).find((line) => line.startsWith("D:"));
-    return sddl !== undefined && isOwnerOnly(sddl, sid);
+    if (sddl === undefined) return { private: false, found: "no access list" };
+    return { private: isOwnerOnly(sddl, sid), found: describeAccess(sddl) };
   } finally {
     await fs.rm(scratch, { force: true }).catch(() => undefined);
   }
+}
+
+/** Checks that a file's or folder's access list grants this user and no one else. */
+export async function isCurrentUserOnly(target: string, run: Runner = nodeRunner): Promise<boolean> {
+  return (await inspectAccess(target, run)).private;
 }
 
 export interface PrivateIo {
@@ -87,7 +117,8 @@ export async function writePrivateFile(file: string, data: string | Uint8Array, 
   try {
     if (platform === "win32") {
       await restrictToCurrentUser(temp, io.run ? { run: io.run } : {});
-      if (!(await isCurrentUserOnly(temp, io.run))) throw new VivahError("FILE_PROTECTION_FAILED", `The access list of ${path.basename(file)} could not be confirmed as private, so nothing was written to it.`);
+      const access = await inspectAccess(temp, io.run ?? nodeRunner);
+      if (!access.private) throw new VivahError("FILE_PROTECTION_FAILED", `The access list of ${path.basename(file)} could not be confirmed as private (found: ${access.found}), so nothing was written to it.`);
     } else if (((await handle.stat()).mode & 0o077) !== 0) {
       throw new VivahError("FILE_PROTECTION_FAILED", `${path.basename(file)} was created readable by others, so nothing was written to it.`);
     }
@@ -118,7 +149,8 @@ export async function ensurePrivateDir(dir: string, io: PrivateIo = {}): Promise
   await fs.mkdir(dir, { recursive: true, ...(platform !== "win32" && { mode: 0o700 }) });
   if (platform === "win32") {
     if (!existed) await restrictToCurrentUser(dir, { folder: true, ...(io.run && { run: io.run }) });
-    if (!(await isCurrentUserOnly(dir, io.run))) throw new VivahError("FILE_PROTECTION_FAILED", `${dir} can be opened by other accounts, so it will not be used for secrets.`);
+    const access = await inspectAccess(dir, io.run ?? nodeRunner);
+    if (!access.private) throw new VivahError("FILE_PROTECTION_FAILED", `${dir} can be opened by other accounts (found: ${access.found}), so it will not be used for secrets.`);
     return;
   }
   const info = await fs.lstat(dir);
