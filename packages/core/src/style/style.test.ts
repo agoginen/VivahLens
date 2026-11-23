@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EditRecipe } from "../recipe/editRecipe.js";
 import { findOutliers } from "./consistency.js";
 import { clusterScenes } from "./sceneCluster.js";
-import { learnFromOverrides, type StyleProfile } from "./styleProfile.js";
+import { learnFromOverrides, styleLineage, StyleProfileSchema, versionAfter, type StyleProfile } from "./styleProfile.js";
 
 const recipe = (exposure: number): EditRecipe => ({ version: "1.0", assetType: "photo", adjustments: { exposure } });
 
@@ -22,6 +22,39 @@ describe("learnFromOverrides", () => {
 
   it("adopts the value directly when the profile had none", () => {
     expect(learnFromOverrides(profile, [{ path: "contrast", value: 20 }]).baseAdjustments.contrast).toBe(20);
+  });
+
+  it("is still the same style afterwards: what it was learned from is kept", () => {
+    const learned = { ...profile, learnedFrom: "refs-a" };
+    const nudged = learnFromOverrides(learned, [{ path: "exposure", value: 1 }]);
+    expect(styleLineage(nudged)).toBe(styleLineage(learned));
+    expect(StyleProfileSchema.parse(nudged).learnedFrom).toBe("refs-a");
+  });
+});
+
+describe("a style learned again under the same name", () => {
+  const first: StyleProfile = { id: "warm", name: "Warm", version: 1, summary: "warm", baseAdjustments: { exposure: 0.3, whiteBalance: { tempK: 5400 } }, learnedFrom: "refs-a/mock" };
+
+  it("is version 1 when nothing was known before", () => {
+    expect(versionAfter(undefined, first).version).toBe(1);
+  });
+
+  it("keeps its version when it came out the same, whatever order its settings are written in", () => {
+    const again: StyleProfile = { ...first, baseAdjustments: { whiteBalance: { tempK: 5400 }, exposure: 0.3 } };
+    expect(versionAfter({ ...first, version: 4 }, again).version).toBe(4);
+  });
+
+  it("takes the next version when it came out differently, or was learned from something else", () => {
+    expect(versionAfter(first, { ...first, summary: "black and white", baseAdjustments: { saturation: -100 } }).version).toBe(2);
+    expect(versionAfter({ ...first, version: 3 }, { ...first, learnedFrom: "refs-a/real-model" }).version).toBe(4);
+    const { learnedFrom: _unknown, ...older } = first;
+    expect(versionAfter(older, first).version).toBe(2);
+  });
+
+  it("is a different style when learned from something else, and the same style at any version otherwise", () => {
+    expect(styleLineage({ ...first, version: 7 })).toBe(styleLineage(first));
+    expect(styleLineage({ ...first, learnedFrom: "refs-b/mock" })).not.toBe(styleLineage(first));
+    expect(styleLineage({ id: "warm" })).toBe("warm");
   });
 });
 

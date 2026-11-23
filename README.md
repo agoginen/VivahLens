@@ -42,6 +42,8 @@ npm start
 
 Started this way it uses the built-in renderer and the offline demo model, which gives every photo the same sample edit and sends nothing anywhere. To edit for real, open **Advanced options** on the page, pick a model provider and enter the model name; the key is read from the environment variables below. Options go after `--`, for example `npm start -- --adapter xmp` or `npm start -- --no-open` (print the address instead of opening a browser).
 
+Starting again on a folder you already edited carries on where it stopped. If you changed the style photos or the model since then, it is a different style: the photos are edited again in it and come back for review, including ones you had approved or exported (their approval was of the other look). Photos you adjusted by hand keep your settings.
+
 The same steps are available one at a time from the command line:
 
 ```powershell
@@ -180,8 +182,8 @@ The same options work on `export` and `review` when the adapter can export (RawT
 
 | Command | Purpose |
 |---|---|
-| `learn` | Learn a style from reference photos (`--refs`) or your own XMP edits (`--from-xmp`) |
-| `edit` | Cull, propose and apply edits; resumable (kill it any time and run it again); stops at review. `--offline` reuses earlier work with no model; `--workers <n>` sets the decoder threads |
+| `learn` | Learn a style from reference photos (`--refs`) or your own XMP edits (`--from-xmp`). Learning again under the same name gives the next version unless it came out the same |
+| `edit` | Cull, propose and apply edits; resumable (kill it any time and run it again); stops at review. `--offline` reuses earlier work with no model; `--workers <n>` sets the decoder threads; `--restyle` edits again the photos the job edited in a different style (other reference photos or another model), which are otherwise left alone and reported |
 | `undo` | Take a job's edits back out of your files |
 | `review` | Local review UI (127.0.0.1, one-time token). With no `--folder` and `--profile` it starts on a page where you choose the folders and start the edit (`npm start`) |
 | `export` | Approve or export from the command line |

@@ -13,7 +13,7 @@ import type { Logger } from "../observability/logger.js";
 import type { StyleRetriever } from "../style/retrieval.js";
 import { clusterScenes, type SceneSignature } from "../style/sceneCluster.js";
 import { proposeRecipe, type Preview } from "../style/styleEngine.js";
-import { diffOverrides, readScalar, type StyleProfile } from "../style/styleProfile.js";
+import { diffOverrides, readScalar, styleLineage, type StyleProfile } from "../style/styleProfile.js";
 import type { AuditEvent, LibraryStore } from "./libraryStore.js";
 import type { ItemState, JobItem, JobStore } from "./jobStore.js";
 import { failure, forEachItem, type StageStop } from "./stage.js";
@@ -67,6 +67,12 @@ export interface JobInput {
   assets: readonly AssetRef[];
   /** Retry items that failed in an earlier run, from the stage where they failed. */
   retryFailed?: boolean;
+  /**
+   * Edit again the photos this job edited in a different style (other reference photos, another model, or another style
+   * altogether), approved and exported ones included: their approval was of a different look. Photos the reviewer
+   * adjusted by hand are left as they are. Without it such photos are only reported (`ReviewSummary.otherStyle`).
+   */
+  restyle?: boolean;
 }
 
 export interface ReviewSummary {
@@ -87,6 +93,10 @@ export interface ReviewSummary {
   waitingForModel: string[];
   /** What the editor adapter could not do for a photo (a setting it cannot express, a file type it ignores), by photo. */
   warnings: Record<string, string[]>;
+  /** Photos edited again in this run because their edit was made in a different style (`JobInput.restyle`). */
+  restyled: string[];
+  /** Photos whose edit was made in a different style and that were left as they are. */
+  otherStyle: string[];
   /**
    * The run stopped before every photo was handled because of something no photo could get past (no credit left, a rejected
    * key). Photos not yet started wait where they were; fix the cause and run again to continue.
@@ -101,8 +111,8 @@ const audit = (deps: Pick<StageDeps, "library" | "logger">, event: Omit<AuditEve
 
 /**
  * Runs queued → identify → cull → scene → style match → recipe → apply, then stops at the mandatory human review
- * checkpoint. Re-running with the same job id resumes from persisted state; completed work is never redone.
- * One item's failure never aborts the batch.
+ * checkpoint. Re-running with the same job id resumes from persisted state; completed work is never redone, except
+ * that `restyle` edits again what was edited in a different style. One item's failure never aborts the batch.
  */
 export async function runJob(deps: PipelineDeps, input: JobInput): Promise<ReviewSummary> {
   const { store, adapter, library } = deps;
@@ -128,6 +138,12 @@ export async function runJob(deps: PipelineDeps, input: JobInput): Promise<Revie
     }
   }
 
+  const stale = editedInAnotherStyle(store.listItems(input.id), deps.profile).map((i) => i.assetId);
+  if (input.restyle && stale.length > 0) {
+    restyle(store, input.id, new Set(stale));
+    audit(deps, { action: "job-restyled", jobId: input.id, meta: { photos: stale.length, profile: `${deps.profile.id}@${deps.profile.version}` } });
+  }
+
   const assets = new Map(input.assets.map((a) => [a.id, a]));
   const itemsIn = (state: ItemState) => store.listItems(input.id).filter((i) => i.state === state);
   const ctx: AdapterContext = { jobId: input.id, signal: deps.signal };
@@ -145,7 +161,7 @@ export async function runJob(deps: PipelineDeps, input: JobInput): Promise<Revie
     unbind();
   }
 
-  const summary = { ...summarize(store, input.id, adapter.capabilities), ...(stoppedEarly && { stoppedEarly }) };
+  const summary = { ...summarize(store, input.id, adapter.capabilities), restyled: input.restyle ? stale : [], otherStyle: input.restyle ? [] : stale, ...(stoppedEarly && { stoppedEarly }) };
   audit(deps, {
     action: "job-ready-for-review",
     jobId: input.id,
@@ -158,6 +174,36 @@ export async function runJob(deps: PipelineDeps, input: JobInput): Promise<Revie
     },
   });
   return summary;
+}
+
+/** The states in which a photo carries an edit: proposed, applied, or decided on. */
+const EDITED_STATES: readonly ItemState[] = ["recipe-generated", "applying", "review", "approved", "exported", "delivered"];
+
+/**
+ * The photos whose edit was proposed for a different style than the one this run uses. A photo the reviewer adjusted by
+ * hand is never one of them: that edit is the reviewer's, not the style's. An edit from before styles were recorded is
+ * judged by the style its recipe names, and left alone when it names none.
+ */
+function editedInAnotherStyle(items: readonly JobItem[], profile: StyleProfile): JobItem[] {
+  const wanted = styleLineage(profile);
+  return items.filter((i) => {
+    if (!i.recipe || !EDITED_STATES.includes(i.state) || i.overridden || i.recipeSource === "override") return false;
+    const style = i.recipeStyle ?? i.recipe.sourceStyleProfileId;
+    return style !== undefined && style !== wanted;
+  });
+}
+
+/**
+ * Sends photos back to just after the cull, without their edit, so the run proposes and applies a new one. What the
+ * cull and the scene grouping found is kept (neither depends on the style); the examples picked from the old style's
+ * reference photos are not. A file already exported stays where it is until the photo is approved and exported again.
+ */
+function restyle(store: JobStore, jobId: string, ids: ReadonlySet<string>): void {
+  for (const item of store.listItems(jobId)) {
+    if (!ids.has(item.assetId)) continue;
+    const { recipe: _recipe, recipeSource: _source, recipeStyle: _style, outputs: _outputs, exportedFile: _file, deliveredTo: _to, outlierFields: _outliers, warnings: _warnings, styleMatch: _match, ...kept } = item;
+    store.putItem({ ...kept, state: "culled" });
+  }
 }
 
 /** Cancelling the job (Ctrl-C, the signal) also stops what the adapter has in flight: a started process, queued plugin requests. */
@@ -204,7 +250,7 @@ async function recipeStage(deps: PipelineDeps, jobId: string, assets: Map<string
   return forEachItem(deps, "recipe-generated", items, async (item, asset) => {
     const known = item.fingerprint ? library?.findRecipe(item.fingerprint, profile.id, profile.version) : undefined;
     if (known) {
-      store.putItem({ ...item, state: "recipe-generated", recipe: known.recipe, recipeSource: known.source === "override" ? "override" : "cache" });
+      store.putItem({ ...item, state: "recipe-generated", recipe: known.recipe, recipeSource: known.source === "override" ? "override" : "cache", recipeStyle: styleLineage(profile) });
       return { source: known.source === "override" ? "override" : "cache", recipeHash: known.hash };
     }
     if (deps.offline) return; // waits in `style-matched` for a run that can reach the model
@@ -215,7 +261,7 @@ async function recipeStage(deps: PipelineDeps, jobId: string, assets: Map<string
         : undefined;
     const examples = item.styleMatch && deps.styleMatch ? await deps.styleMatch.exemplars(item.styleMatch.exemplarIds).catch(() => []) : [];
     const recipe = EditRecipeSchema.parse(await proposeRecipe(deps.gateway, { preview: await deps.previewOf(asset), profile, scene, examples }));
-    store.putItem({ ...item, state: "recipe-generated", recipe, recipeSource: "llm" });
+    store.putItem({ ...item, state: "recipe-generated", recipe, recipeSource: "llm", recipeStyle: styleLineage(profile) });
     const hash = recipeHash(recipe);
     if (item.fingerprint) {
       library?.putRecipe({
@@ -349,7 +395,8 @@ export async function exportApproved(
             );
           }
           // The reviewer's version is what any later run on this exact file should start from.
-          const profileId = store.getJob(jobId)?.styleProfileId;
+          // The recipe names the style it was proposed for; the job only remembers the style of its first run.
+          const profileId = item.recipe?.sourceStyleProfileId ?? store.getJob(jobId)?.styleProfileId;
           if (item.fingerprint && profileId) {
             library.putRecipe({
               hash: recipeHash(valid),
@@ -531,7 +578,7 @@ function flagOutliers(store: JobStore, jobId: string): void {
   }
 }
 
-function summarize(store: JobStore, jobId: string, caps: AdapterCapabilities): ReviewSummary {
+function summarize(store: JobStore, jobId: string, caps: AdapterCapabilities): Omit<ReviewSummary, "restyled" | "otherStyle"> {
   const items = store.listItems(jobId);
   const unsupported: Record<string, string[]> = {};
   const outliers: Record<string, string[]> = {};

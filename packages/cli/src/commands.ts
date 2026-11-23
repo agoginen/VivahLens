@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +21,7 @@ import {
   notify,
   profileFromRecipes,
   proposeRecipe,
+  recipeHash,
   removeBridgeHandshake,
   runJob,
   runProcess,
@@ -29,6 +31,7 @@ import {
   summarizePerceptual,
   undoJob,
   verifyEntitlement,
+  versionAfter,
   VivahError,
   writeBridgeHandshake,
   type AssetRef,
@@ -44,7 +47,7 @@ import {
   type StyleProfile,
   type VersionedPriceTable,
 } from "@vivahlens/core";
-import { DecodePool, defaultDecodeWorkers, loadPreview, scanFolder } from "@vivahlens/ingest";
+import { DecodePool, defaultDecodeWorkers, fingerprintFile, loadPreview, scanFolder } from "@vivahlens/ingest";
 import { createPreviewRenderer, RenderAdapter } from "@vivahlens/render";
 import { writeZip } from "@vivahlens/delivery";
 import { startReviewServer, startStudioServer, FieldError, type ReviewDeps, type ReviewServer, type StartRequest, type StudioWorkflow } from "@vivahlens/review";
@@ -106,9 +109,11 @@ const USAGE = `vivah: AI editing automation (local-first)
 
   vivah learn  --refs <dir> --name <style> [--out profile.json]      learn a style from finished photos (LLM)
   vivah learn  --from-xmp <dir> --name <style>                       learn from your own Lightroom edits (exact, no LLM)
-  vivah edit   --folder <dir> --profile <file> [--adapter xmp|rawtherapee|darktable|lightroom|render] [--offline]
+  vivah edit   --folder <dir> --profile <file> [--adapter xmp|rawtherapee|darktable|lightroom|render] [--offline] [--restyle]
                                                                     cull, propose and apply edits, then stop for review
                                                                     (--offline: no model; reuses edits already made to the same files)
+                                                                    (--restyle: edit again the photos this job edited in a different
+                                                                    style, approved ones too; photos you adjusted by hand are kept)
   vivah undo   (--folder <dir> | --job <id>) [--dry-run] [--force] [--photos a.cr3,b.cr3]
                                                                     take a job's edits back out of your files (sidecars restored)
   vivah review [--folder <dir> --profile <file>] [--export-dir <dir>] [--no-open]
@@ -194,6 +199,7 @@ const OPTIONS = {
   "plugin-wait": { type: "string" },
   "retry-failed": { type: "boolean" },
   offline: { type: "boolean" },
+  restyle: { type: "boolean" },
   "no-open": { type: "boolean" },
   perceptual: { type: "boolean" },
   notify: { type: "boolean" },
@@ -396,7 +402,35 @@ async function loadProfile(file: string): Promise<StyleProfile> {
   return StyleProfileSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
 }
 
-async function learn(v: Args, ctx: CliContext): Promise<number> {
+/** What a style was learned from, as one value: the same things read the same way always give the same value. */
+const learnedFrom = (how: string, what: readonly string[]): string =>
+  createHash("sha256").update([how, ...[...what].sort()].join("\n")).digest("hex").slice(0, 32);
+
+/** The newest version of a style that this computer knows: the profile file it would be saved to, or the database. */
+async function latestStyle(id: string, file: string, store: SqliteStore): Promise<StyleProfile | undefined> {
+  const saved = await loadProfile(file).catch(() => undefined);
+  const inFile = saved?.id === id ? saved : undefined;
+  const inStore = store.loadProfile(id);
+  return inFile && inStore ? (inStore.version > inFile.version ? inStore : inFile) : (inFile ?? inStore);
+}
+
+/** Numbers the learned style after the versions already known, and keeps it: in the profile file and in the database. */
+async function saveLearned(learned: StyleProfile, out: string, store: SqliteStore): Promise<StyleProfile> {
+  const profile = StyleProfileSchema.parse(versionAfter(await latestStyle(learned.id, out, store), learned));
+  await fs.writeFile(out, JSON.stringify(profile, null, 2), "utf8");
+  store.saveProfile(profile);
+  return profile;
+}
+
+const versionNote = (profile: StyleProfile): string => (profile.version > 1 ? ` (version ${profile.version})` : "");
+
+/**
+ * Learns a style and saves it. A style learned again under the same name gets the next version number unless it came out
+ * exactly the same, so edits proposed for the old one are never taken for the new one's. With `reuse`, a style already
+ * learned from these same photos by this same model is kept as it is (with the corrections made in review since) and the
+ * model is not asked again.
+ */
+async function learn(v: Args, ctx: CliContext, opts: { reuse?: boolean } = {}): Promise<number> {
   const name = need(v.name, "name");
   const out = v.out ?? `${slug(name)}.profile.json`;
 
@@ -405,9 +439,14 @@ async function learn(v: Args, ctx: CliContext): Promise<number> {
     const { edits, skipped } = await readXmpEdits(v["from-xmp"]);
     if (edits.length === 0) throw new Error(`No usable Lightroom/Camera Raw XMP edits found in ${v["from-xmp"]}`);
     const generated = edits.filter((e) => e.generated).length;
-    const profile = profileFromRecipes(edits.map((e) => e.recipe), { id: slug(name), name });
-    await fs.writeFile(out, JSON.stringify(StyleProfileSchema.parse(profile), null, 2), "utf8");
-    ctx.log(`Style "${name}" learned from ${edits.length} XMP edit(s)${skipped.length ? ` (${skipped.length} skipped)` : ""} and saved to ${out}\n  ${profile.summary}`);
+    const store = await openStore(v, ctx);
+    try {
+      const source = learnedFrom("xmp", edits.map((e) => recipeHash(e.recipe)));
+      const profile = await saveLearned({ ...profileFromRecipes(edits.map((e) => e.recipe), { id: slug(name), name }), learnedFrom: source }, out, store);
+      ctx.log(`Style "${name}" learned from ${edits.length} XMP edit(s)${skipped.length ? ` (${skipped.length} skipped)` : ""} and saved to ${out}${versionNote(profile)}\n  ${profile.summary}`);
+    } finally {
+      store.close();
+    }
     if (generated) info(ctx, `Note: ${generated} of these sidecars were written by VivahLens (possibly after your corrections), not purely your own edits.`);
     return 0;
   }
@@ -418,13 +457,21 @@ async function learn(v: Args, ctx: CliContext): Promise<number> {
 
   const { gateway, store } = await openGateway(v, ctx);
   try {
+    const choice = providerChoice(v);
+    const source = learnedFrom(`${choice.provider}/${choice.model}`, await Promise.all(refs.map((a) => fingerprintFile(a.path))));
+    if (opts.reuse) {
+      const known = await latestStyle(slug(name), out, store);
+      if (known?.learnedFrom === source) {
+        await fs.writeFile(out, JSON.stringify(StyleProfileSchema.parse(known), null, 2), "utf8");
+        ctx.log(`Style "${name}" is already learned from these photos with this model${versionNote(known)}; using it.\n  ${known.summary}`);
+        return 0;
+      }
+    }
     announceProvider(v, ctx);
     info(ctx, `Sending ${refs.length} downscaled preview(s) to "${v.provider}" to learn the style…`);
     const previews = await Promise.all(refs.map((a) => loadPreview(a)));
-    const profile = await learnStyle(gateway, { id: slug(name), name, references: previews });
-
-    await fs.writeFile(out, JSON.stringify(StyleProfileSchema.parse(profile), null, 2), "utf8");
-    ctx.log(`Style "${name}" saved to ${out}\n  ${profile.summary}`);
+    const profile = await saveLearned({ ...(await learnStyle(gateway, { id: slug(name), name, references: previews })), learnedFrom: source }, out, store);
+    ctx.log(`Style "${name}" saved to ${out}${versionNote(profile)}\n  ${profile.summary}`);
     return 0;
   } finally {
     store.close();
@@ -522,7 +569,7 @@ async function edit(v: Args, ctx: CliContext, onProgress?: (event: { stage: stri
         },
         logger: log.logger,
       },
-      { id, name: path.basename(folder), assets, retryFailed: v["retry-failed"] },
+      { id, name: path.basename(folder), assets, retryFailed: v["retry-failed"], restyle: v.restyle },
     );
     printSummary(summary, ctx);
     await announceFinished(
@@ -702,6 +749,8 @@ function studioWorkflow(v: Args, ctx: CliContext, given: ReadonlySet<string>): S
         job: undefined,
         // Starting again means "do it": photos that failed last time are tried again.
         "retry-failed": true,
+        // The person chose this style for this folder: photos an earlier run edited in another style are edited again.
+        restyle: true,
       };
       const say = (line: string) => {
         hooks.log(line);
@@ -711,7 +760,8 @@ function studioWorkflow(v: Args, ctx: CliContext, given: ReadonlySet<string>): S
       const step: CliContext = { ...ctx, log: say, info: say, signal };
 
       hooks.progress({ stage: "learning", done: 0, total: 1 });
-      if ((await learn(run, step)) !== 0) throw new Error("The style could not be learned.");
+      // The same style photos with the same model are not learned twice, so stopping and starting again carries on.
+      if ((await learn(run, step, { reuse: true })) !== 0) throw new Error("The style could not be learned.");
       signal.throwIfAborted();
       hooks.progress({ stage: "learning", done: 1, total: 1 });
       await edit(run, step, (event) => hooks.progress(event));
@@ -1312,6 +1362,8 @@ function printSummary(s: ReviewSummary, ctx: CliContext): void {
   ctx.log(`Job "${s.jobId}": ${s.awaitingReview.length} ready for review, ${s.rejected.length} culled, ${s.failed.length} failed`);
   const reasons = Object.values(s.rejectReasons).reduce<Record<string, number>>((acc, r) => ({ ...acc, [r]: (acc[r] ?? 0) + 1 }), {});
   if (Object.keys(reasons).length) ctx.log(`  culled: ${Object.entries(reasons).map(([r, n]) => `${n} ${r}`).join(", ")}`);
+  if (s.restyled.length) ctx.log(`  edited again in this style: ${s.restyled.length} photo(s) that had been edited in a different one`);
+  if (s.otherStyle.length) ctx.log(`  note: ${s.otherStyle.length} photo(s) were edited in a different style and were left as they are; run "vivah edit" again with --restyle to edit them in this one`);
   if (s.waitingForModel.length) ctx.log(`  waiting for the model: ${s.waitingForModel.length} photo(s); run "vivah edit" again without --offline to finish them`);
   if (s.stoppedEarly) ctx.log(`  stopped early: [${s.stoppedEarly.code}] ${s.stoppedEarly.message}\n  Photos not yet started were left as they were; fix this and run the same command again to continue.`);
   for (const f of s.failed) ctx.log(`  failed ${f.assetId}: [${f.code}] ${f.message}`);

@@ -114,6 +114,78 @@ describe("recipes remembered per file", () => {
   });
 });
 
+describe("a job run again in a different style", () => {
+  const bw: StyleProfile = { id: "warm", name: "Warm", version: 2, summary: "black and white", baseAdjustments: { saturation: -100 }, learnedFrom: "other-photos" };
+  const mine: EditRecipe = { version: "1.0", assetType: "photo", sourceStyleProfileId: "warm", adjustments: { exposure: -0.7 } };
+
+  /** A job edited in the first style: `review` waits, `sent` is exported, `mine` was adjusted by the reviewer and exported. */
+  async function editedInTheFirstStyle() {
+    const store = new MemoryStore();
+    const { gateway, asked } = llm();
+    const { adapter, calls } = editor();
+    const input = { id: "j", name: "shoot", assets: [asset("review"), asset("sent"), asset("mine")] };
+    await runJob(pipeline(store, { gateway, adapter }), input);
+    await exportApproved({ store, library: store, adapter }, "j", input.assets, { approve: ["sent", "mine"], overrides: { mine }, exportSpec: spec });
+    asked.length = 0;
+    calls.applied.length = 0;
+    return { store, gateway, asked, adapter, calls, input };
+  }
+  const states = (store: MemoryStore) => Object.fromEntries(store.listItems("j").map((i) => [i.assetId, i.state]));
+
+  it("leaves the photos as they are and says which ones, unless asked to edit them again", async () => {
+    const { store, gateway, asked, adapter, input } = await editedInTheFirstStyle();
+    const summary = await runJob(pipeline(store, { gateway, adapter, profile: bw }), input);
+    expect(asked).toHaveLength(0);
+    expect(summary.otherStyle.sort()).toEqual(["review", "sent"]);
+    expect(summary.restyled).toEqual([]);
+    expect(states(store)).toEqual({ review: "review", sent: "exported", mine: "exported" });
+  });
+
+  it("edits them again when asked, exported ones too, and keeps what the reviewer adjusted by hand", async () => {
+    const { store, gateway, asked, adapter, calls, input } = await editedInTheFirstStyle();
+    const summary = await runJob(pipeline(store, { gateway, adapter, profile: bw }), { ...input, restyle: true });
+
+    expect(asked.map((q) => q.id).sort()).toEqual(["review", "sent"]);
+    expect(calls.applied.sort()).toEqual(["review", "sent"]);
+    expect(summary.restyled.sort()).toEqual(["review", "sent"]);
+    expect(summary.otherStyle).toEqual([]);
+    expect(states(store)).toEqual({ review: "review", sent: "review", mine: "exported" });
+
+    const items = new Map(store.listItems("j").map((i) => [i.assetId, i]));
+    expect(items.get("sent")).toMatchObject({ recipeSource: "llm", recipeStyle: "warm#other-photos" });
+    expect(items.get("sent")!.recipe!.adjustments.saturation).toBe(-100);
+    expect(items.get("sent")!.exportedFile).toBeUndefined();
+    expect(items.get("mine")!.recipe!.adjustments.exposure).toBe(-0.7);
+    expect(store.listAudit({ jobId: "j" }).find((e) => e.action === "job-restyled")?.meta).toMatchObject({ photos: 2, profile: "warm@2" });
+
+    // Nothing is left to redo: the same run again asks for nothing.
+    asked.length = 0;
+    expect((await runJob(pipeline(store, { gateway, adapter, profile: bw }), { ...input, restyle: true })).restyled).toEqual([]);
+    expect(asked).toHaveLength(0);
+  });
+
+  it("does not redo anything for the same style at a later version, which is the reviewer's corrections and not another look", async () => {
+    const { store, gateway, asked, adapter, input } = await editedInTheFirstStyle();
+    const summary = await runJob(pipeline(store, { gateway, adapter, profile: { ...profile, version: 2 } }), { ...input, restyle: true });
+    expect(asked).toHaveLength(0);
+    expect(summary.restyled).toEqual([]);
+    expect(states(store)).toEqual({ review: "review", sent: "exported", mine: "exported" });
+  });
+
+  it("judges an edit made before styles were recorded by the style its recipe names", async () => {
+    const { store, gateway, asked, adapter, input } = await editedInTheFirstStyle();
+    for (const item of store.listItems("j")) {
+      const { recipeStyle: _unrecorded, ...older } = item;
+      store.putItem(older);
+    }
+    expect((await runJob(pipeline(store, { gateway, adapter }), { ...input, restyle: true })).restyled).toEqual([]);
+    expect(asked).toHaveLength(0);
+
+    const summary = await runJob(pipeline(store, { gateway, adapter, profile: bw }), { ...input, restyle: true });
+    expect(summary.restyled.sort()).toEqual(["review", "sent"]);
+  });
+});
+
 describe("working offline", () => {
   it("applies what is already known, parks the rest without calling the model, and finishes them when back online", async () => {
     const store = new MemoryStore();
