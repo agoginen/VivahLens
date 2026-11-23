@@ -31,7 +31,20 @@ Requires **Node 22.13 or newer** (or build the single executable below, which ne
 ```powershell
 npm install
 npm run build
+npm start
+```
 
+`npm start` (the same as `node packages/cli/dist/main.js review`) opens a page in your browser, and the rest happens there with nothing more to type:
+
+1. **Choose three folders** with the Browse buttons: the photos to edit, where to save the edited copies, and a folder of finished photos in the style you want. Each one is checked as you pick it (how many photos it holds, whether the output folder will be created).
+2. **Start editing.** The page learns the style, culls and edits the whole folder, and shows each step with a progress bar and a Stop button. Stopping keeps what is finished, so starting again carries on.
+3. **Review.** Approve or flag photos one at a time, or tick several (click the boxes, Shift-click for a range, **Select all**) and use **Approve selected**, **Flag selected for retouch** or **Remove retouch flag**. **Approve all shown** is still there. **Submit decisions** saves the approved photos into the output folder, and **New shoot** goes back to step 1.
+
+Started this way it uses the built-in renderer and the offline demo model, which gives every photo the same sample edit and sends nothing anywhere. To edit for real, open **Advanced options** on the page, pick a model provider and enter the model name; the key is read from the environment variables below. Options go after `--`, for example `npm start -- --adapter xmp` or `npm start -- --no-open` (print the address instead of opening a browser).
+
+The same steps are available one at a time from the command line:
+
+```powershell
 # offline demo: the "mock" provider sends nothing anywhere
 node packages/cli/dist/main.js doctor
 node packages/cli/dist/main.js learn --refs <finished-photos> --name Warm --provider mock
@@ -53,7 +66,7 @@ There is **no hosted website and no username/password login**. What exists:
 | Piece | What it is | How you reach it |
 |---|---|---|
 | **CLI** (`vivah`, [packages/cli](packages/cli)) | The main program: `learn`, `edit`, `review`, `export`, `deliver`, `cut`, `doctor`... | `node packages/cli/dist/main.js <command>` |
-| **Review "website"** ([packages/review](packages/review)) | A local web page the CLI starts for the `review` command. Only on `127.0.0.1`, on a random port, behind a one-time token in the URL | The URL printed by `vivah review` |
+| **Review "website"** ([packages/review](packages/review)) | A local web page the CLI starts for the `review` command: choose the folders, start the edit, review the result. Only on `127.0.0.1`, on a random port, behind a one-time token in the URL | `npm start` opens it; the URL is also printed |
 | **Engine** (core, ingest, render, delivery, video) | Libraries the CLI uses: styles, culling, LLM gateway, job database, renderer, finishing | Used through the CLI |
 | **Editor adapters** (xmp, rawtherapee, darktable, lightroom) | Apply edits through the editor you own; `render` needs no editor | `--adapter <name>` |
 | **Licensing server** ([packages/cloud-api](packages/cloud-api)) | Reference server for licence activation, plans and usage. It is a library with **no launcher script yet**; it is exercised by its tests | Tests, or embed `createCloudApi(...)` in your own script |
@@ -84,6 +97,8 @@ It prints `Review page: http://127.0.0.1:<port>/?t=<token>`; open that exact URL
 ### 3. Full offline run with your own photos (no API key, nothing sent anywhere)
 
 Use a folder of finished JPEGs as `refs` and a folder of photos to edit as `shoot`. Work on copies: the `render` adapter writes next to the photos (`*.vivah.json`) and `xmp` writes `.xmp` sidecars; `vivah undo` removes them again.
+
+The short way is `npm start`: choose `shoot`, an export folder and `refs` on the page, press **Start editing**, then review (see Quick start). The commands below do the same thing one step at a time:
 
 ```powershell
 $env:VIVAH_HOME = "$env:TEMP\vivah-home"      # optional: keep test data out of ~/.vivahlens
@@ -168,7 +183,7 @@ The same options work on `export` and `review` when the adapter can export (RawT
 | `learn` | Learn a style from reference photos (`--refs`) or your own XMP edits (`--from-xmp`) |
 | `edit` | Cull, propose and apply edits; resumable (kill it any time and run it again); stops at review. `--offline` reuses earlier work with no model; `--workers <n>` sets the decoder threads |
 | `undo` | Take a job's edits back out of your files |
-| `review` | Local review UI (127.0.0.1, one-time token) |
+| `review` | Local review UI (127.0.0.1, one-time token). With no `--folder` and `--profile` it starts on a page where you choose the folders and start the edit (`npm start`) |
 | `export` | Approve or export from the command line |
 | `deliver` | Finish exported JPEGs for the client: remove location, add credit, watermark, size ceiling, ZIP |
 | `stats`, `privacy` | Acceptance rate and corrections for a job; what has been sent to model providers (counts and sizes only) |
