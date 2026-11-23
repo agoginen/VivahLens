@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "build": "tsc -b && node scripts/copy-assets.mjs",
+    "start": "node packages/cli/dist/main.js review",
     "test": "vitest run",
     "schema": "node scripts/emit-schema.mjs",
     "licenses": "node scripts/check-licenses.mjs",
