@@ -104,7 +104,7 @@ export async function smoke({ command, version, log = () => undefined }) {
     });
 
     await check(SMOKE_CHECKS[3], async () => {
-      const child = spawn(command[0], [...command.slice(1), "review", "--folder", shoot, "--profile", profile, "--provider", "mock"], { env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(command[0], [...command.slice(1), "review", "--folder", shoot, "--profile", profile, "--provider", "mock", "--no-open"], { env, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       child.stdout.on("data", (d) => (output += d));
       child.stderr.on("data", (d) => (output += d));

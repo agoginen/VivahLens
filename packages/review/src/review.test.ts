@@ -7,7 +7,8 @@ import {
   type EditRecipe,
   type StyleProfile,
 } from "@vivahlens/core";
-import { startReviewServer, type ReviewDeps, type ReviewServer } from "./server.js";
+import { startReviewServer, type ReviewServer } from "./server.js";
+import type { ReviewDeps } from "./session.js";
 import { reviewPage } from "./ui.js";
 
 const recipe = (exposure: number): EditRecipe => ({ version: "1.0", assetType: "photo", adjustments: { exposure, contrast: 5 } });
@@ -170,7 +171,8 @@ describe("the page's own files", () => {
     const get = (path: string) => fetch(`${base.origin}${path}`);
     for (const [path, type] of [
       ["/assets/app.js", "text/javascript"], ["/assets/i18n.js", "text/javascript"], ["/assets/fields.js", "text/javascript"], ["/assets/filters.js", "text/javascript"],
-      ["/assets/nav.js", "text/javascript"], ["/assets/app.css", "text/css"], ["/assets/locales/en.json", "application/json"], ["/assets/locales/hi.json", "application/json"],
+      ["/assets/nav.js", "text/javascript"], ["/assets/dom.js", "text/javascript"], ["/assets/selection.js", "text/javascript"], ["/assets/picker.js", "text/javascript"],
+      ["/assets/setup.js", "text/javascript"], ["/assets/app.css", "text/css"], ["/assets/locales/en.json", "application/json"], ["/assets/locales/hi.json", "application/json"],
     ] as const) {
       const res = await get(path);
       expect(res.status, path).toBe(200);
@@ -181,6 +183,20 @@ describe("the page's own files", () => {
     for (const path of ["/assets/../server.ts", "/assets/..%2Fserver.ts", "/assets/app.js.map", "/assets/locales/fr.json", "/assets/", "/server.ts", "/client/app.js"]) {
       expect([401, 404], path).toContain((await get(path)).status);
     }
+  });
+
+  it("serves every script that the page's scripts import, so a new module cannot be forgotten", async () => {
+    const { base } = await start(setup());
+    const queue = ["/assets/app.js"];
+    for (let i = 0; i < queue.length; i++) {
+      const res = await fetch(`${base.origin}${queue[i]}`);
+      expect(res.status, queue[i]).toBe(200);
+      for (const m of (await res.text()).matchAll(/from\s*["'](\.\/[^"']+)["']/g)) {
+        const next = new URL(m[1]!, `${base.origin}${queue[i]}`).pathname;
+        if (!queue.includes(next)) queue.push(next);
+      }
+    }
+    expect(queue.length).toBeGreaterThanOrEqual(8);
   });
 
   it("sends the page under a policy that allows only its own scripts and styles", async () => {

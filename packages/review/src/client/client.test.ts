@@ -5,9 +5,12 @@ import { FIELDS, formatValue, getValue, setValue } from "./fields.js";
 import { FILTERS, countByFilter, defaultFilter, filterItems } from "./filters.js";
 import { createI18n, formatBytes, formatNodes, parseMessage, pickLocale } from "./i18n.js";
 import { columnsFor, gridMove, settleFocus } from "./nav.js";
+import { coverage, keepKnown, selectRange, toggle, toggleAll } from "./selection.js";
+import { parentOf, STAGES, stageStates } from "./setup.js";
 import { reviewPage } from "../ui.js";
 
 const read = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
+const SCRIPTS = ["./app.js", "./dom.js", "./picker.js", "./setup.js", "./selection.js"];
 const en = JSON.parse(read("./locales/en.json")) as Record<string, string>;
 const hi = JSON.parse(read("./locales/hi.json")) as Record<string, string>;
 const i18n = (locale: string) => createI18n({ locale, catalogs: { en, hi } });
@@ -107,17 +110,17 @@ describe("translations", () => {
   });
 
   it("formats every message in both languages without leaving a value unfilled", () => {
-    const values = { job: "j1", adapter: "xmp", message: "m", count: 2, exported: 2, approved: 1, failed: 0, label: "L", name: "IMG_1", fields: "f", reason: "r", note: "n", source: "s", images: 2, size: "1 MB", provider: "p", calls: 2, px: "2,048" };
+    const values = { job: "j1", adapter: "xmp", message: "m", count: 2, exported: 2, approved: 1, failed: 0, label: "L", name: "IMG_1", fields: "f", reason: "r", note: "n", source: "s", images: 2, size: "1 MB", provider: "p", calls: 2, px: "2,048", max: 10, done: 3, total: 9, step: 2, stage: "Culling", folder: "C:\\Out", path: "C:\\Photos" };
     for (const locale of ["en", "hi"]) {
       const t = i18n(locale);
       for (const key of Object.keys(en)) expect(t.t(key, values), `${locale} ${key}`).not.toMatch(/[{}]/);
     }
   });
 
-  it("covers every key the page asks for, including the ones it builds from a state, field or tab name", () => {
-    const script = read("./app.js");
-    const literal = [...script.matchAll(/["'`]((?:app|filter|state|reason|action|view|detail|source|field|note|status|privacy|help)\.[A-Za-z-]+)["'`]/g)].map((m) => m[1]!);
-    expect(literal.length).toBeGreaterThan(40);
+  it("covers every key the page asks for, including the ones it builds from a state, field, tab, folder or stage name", () => {
+    const scripts = ["./app.js", "./setup.js", "./picker.js"].map(read).join("\n");
+    const literal = [...scripts.matchAll(/["'`]((?:app|filter|state|reason|action|view|detail|source|field|note|status|privacy|help|step|phase|review|newShoot|setup|picker|progress|select)\.[A-Za-z.-]+)["'`]/g)].map((m) => m[1]!);
+    expect(literal.length).toBeGreaterThan(60);
     for (const key of new Set(literal)) expect(en, key).toHaveProperty([key]);
     for (const f of FILTERS) expect(en, `filter.${f.id}`).toHaveProperty([`filter.${f.id}`]);
     for (const field of FIELDS) expect(en, `field.${field.id}`).toHaveProperty([`field.${field.id}`]);
@@ -125,7 +128,17 @@ describe("translations", () => {
     for (const reason of ["blurry", "duplicate", "duplicate-file"]) expect(en, reason).toHaveProperty([`reason.${reason}`]);
     for (const source of ["llm", "override", "cache"]) expect(en, source).toHaveProperty([`source.${source}`]);
     for (const reason of ["expired", "subscription", "device"]) expect(en, reason).toHaveProperty([`editing.paused.${reason}`]);
-    expect(script).toContain("`editing.paused.${editing.reason}`");
+    expect(scripts).toContain("`editing.paused.${editing.reason}`");
+    for (const name of ["setup", "running", "review"]) {
+      expect(en, `step.${name}`).toHaveProperty([`step.${name}`]);
+      expect(en, `phase.${name}`).toHaveProperty([`phase.${name}`]);
+    }
+    for (const field of ["input", "output", "profile"]) for (const part of ["label", "help"]) expect(en, `setup.${field}.${part}`).toHaveProperty([`setup.${field}.${part}`]);
+    for (const field of ["input", "output", "profile"]) expect(en, `picker.title.${field}`).toHaveProperty([`picker.title.${field}`]);
+    for (const id of ["mock", "openai", "anthropic", "gemini", "azure", "ollama", "openai-compatible"]) expect(en, `setup.model.${id}`).toHaveProperty([`setup.model.${id}`]);
+    for (const stage of [...STAGES, "starting"]) expect(en, `progress.stage.${stage}`).toHaveProperty([`progress.stage.${stage}`]);
+    for (const kind of ["home", "desktop", "documents", "downloads", "pictures", "onedrive"]) expect(en, `picker.place.${kind}`).toHaveProperty([`picker.place.${kind}`]);
+    for (const code of ["RELATIVE", "MISSING", "NOT_A_FOLDER", "DENIED", "BAD_NAME", "EXISTS", "FAILED"]) expect(en, `picker.error.${code}`).toHaveProperty([`picker.error.${code}`]);
   });
 });
 
@@ -281,8 +294,7 @@ describe("the page is usable", () => {
   });
 
   it("puts text into the DOM only as text, never as markup", () => {
-    const script = read("./app.js");
-    expect(script).not.toMatch(/\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/);
+    for (const file of SCRIPTS) expect(read(file), file).not.toMatch(/\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/);
   });
 
   it("always gives a toggle button an explicit pressed state, true or false, because an absent one means it is not a toggle", () => {
@@ -332,5 +344,89 @@ describe("colours meet WCAG 2.2 AA contrast", () => {
     expect(css).toMatch(/button, select \{ min-height: 2\.5rem; min-width: 2\.5rem;/);
     expect(css).toMatch(/:focus-visible \{ outline: 3px solid var\(--focus\)/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
+  });
+
+  it("gives the tick box over each photo a target of at least 24 CSS pixels, and keeps the selected state visible without colour alone", () => {
+    expect(css).toMatch(/\.pick \{[^}]*width: 1\.75rem; height: 1\.75rem/);
+    expect(css).toMatch(/\.pick-input:checked \+ \.box::after/);
+    expect(css).toMatch(/li\.card\.selected \{[^}]*box-shadow/);
+  });
+
+  it("shows what is hidden as hidden, whatever display a rule gives it", () => {
+    expect(css).toMatch(/\[hidden\] \{ display: none !important; \}/);
+  });
+});
+
+describe("ticking photos", () => {
+  const order = ["a", "b", "c", "d", "e"];
+
+  it("ticks and unticks one photo without touching the set it was given", () => {
+    const start = new Set(["a"]);
+    expect([...toggle(start, "b")]).toEqual(["a", "b"]);
+    expect([...toggle(start, "a")]).toEqual([]);
+    expect([...start]).toEqual(["a"]);
+  });
+
+  it("ticks everything from the last photo ticked to this one, in the order shown, in either direction", () => {
+    expect([...selectRange(new Set(), order, "b", "d")]).toEqual(["b", "c", "d"]);
+    expect([...selectRange(new Set(), order, "d", "b")]).toEqual(["b", "c", "d"]);
+    expect([...selectRange(new Set(["a"]), order, "c", "e")].sort()).toEqual(["a", "c", "d", "e"]);
+  });
+
+  it("ticks just the photo clicked when there is no usable starting point, and nothing for a photo that is not shown", () => {
+    expect([...selectRange(new Set(), order, undefined, "c")]).toEqual(["c"]);
+    expect([...selectRange(new Set(), order, "gone", "c")]).toEqual(["c"]);
+    expect([...selectRange(new Set(["a"]), order, "a", "gone")]).toEqual(["a"]);
+  });
+
+  it("selects all shown photos, or unselects them when they are all ticked already, leaving the rest alone", () => {
+    expect([...toggleAll(new Set(), ["a", "b"])].sort()).toEqual(["a", "b"]);
+    expect([...toggleAll(new Set(["a"]), ["a", "b"])].sort()).toEqual(["a", "b"]);
+    expect([...toggleAll(new Set(["a", "b", "z"]), ["a", "b"])]).toEqual(["z"]);
+    expect([...toggleAll(new Set(["z"]), [])]).toEqual(["z"]);
+  });
+
+  it("forgets photos that are no longer in the list", () => {
+    expect([...keepKnown(new Set(["a", "gone"]), order)]).toEqual(["a"]);
+    expect([...keepKnown(new Set(), order)]).toEqual([]);
+  });
+
+  it("reports how much of what is shown is ticked, for the select-all box", () => {
+    expect(coverage(new Set(), order)).toBe("none");
+    expect(coverage(new Set(["z"]), order)).toBe("none");
+    expect(coverage(new Set(["a", "z"]), order)).toBe("some");
+    expect(coverage(new Set(order), order)).toBe("all");
+    expect(coverage(new Set(order), [])).toBe("none");
+  });
+});
+
+describe("the screens before the photos", () => {
+  it("finds the folder above a path the way a person would see it", () => {
+    expect(parentOf("C:\\Photos\\Wedding")).toBe("C:\\Photos");
+    expect(parentOf("C:\\Photos\\Wedding\\")).toBe("C:\\Photos");
+    expect(parentOf("C:\\Photos")).toBe("C:\\");
+    expect(parentOf("/home/asha/shoot")).toBe("/home/asha");
+    expect(parentOf("/home")).toBe("/");
+    expect(parentOf("\\\\server\\share\\shoot")).toBe("\\\\server\\share");
+    expect(parentOf("plain")).toBe("plain");
+  });
+
+  it("says which step the edit is on and how each step stands", () => {
+    expect(STAGES[0]).toBe("learning");
+    expect(stageStates("culled")).toEqual({ index: 2, states: ["done", "done", "active", "pending", "pending", "pending"] });
+    expect(stageStates("learning").states[0]).toBe("active");
+    expect(stageStates("review").states.at(-1)).toBe("active");
+    expect(stageStates("starting")).toEqual({ index: -1, states: Array(6).fill("pending") });
+  });
+
+  it("has a section for each screen, and a toolbar for the photos", () => {
+    const html = reviewPage("t");
+    for (const id of ["setup", "progress", "review", "toolbar", "steps", "review-actions", "new-shoot"]) expect(html, id).toContain(`id="${id}"`);
+    expect(html).toMatch(/id="toolbar" role="toolbar"/);
+    expect(html).toMatch(/<section class="stage" id="setup"[^>]*hidden>/);
+  });
+
+  it("never sets an inline style, which the page's policy refuses", () => {
+    for (const file of SCRIPTS) expect(read(file), file).not.toMatch(/setAttribute\(\s*["']style["']|["']style["']\s*:/);
   });
 });

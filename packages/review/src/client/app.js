@@ -1,14 +1,19 @@
 // @ts-check
+import { $, h } from "./dom.js";
 import { FIELDS, formatValue, getValue, setValue } from "./fields.js";
 import { FILTERS, countByFilter, defaultFilter, filterItems } from "./filters.js";
 import { createI18n, formatBytes, pickLocale } from "./i18n.js";
 import { columnsFor, gridMove, settleFocus } from "./nav.js";
+import { coverage, keepKnown, selectRange, toggle, toggleAll } from "./selection.js";
+import { createSetup } from "./setup.js";
 
 const token = /** @type {HTMLMetaElement} */ (document.querySelector('meta[name="vivah-token"]')).content;
 const LANGUAGE_NAMES = { en: "English", hi: "हिन्दी" };
 const CARD_MIN_WIDTH = 260;
 const GRID_GAP = 12;
 const RENDER_DELAY_MS = 220;
+const POLL_MS = 700;
+const STEPS = ["setup", "running", "review"];
 
 /** @param {string} path @param {RequestInit} [init] */
 const api = (path, init) => fetch(`${path}${path.includes("?") ? "&" : "?"}t=${encodeURIComponent(token)}`, init);
@@ -21,53 +26,40 @@ const postJson = (/** @type {string} */ path, /** @type {unknown} */ body, /** @
  */
 
 const state = {
+  /** @type {"setup" | "running" | "review"} */ phase: "setup",
+  /** @type {any} */ workspace: null,
   /** @type {Item[]} */ items: [],
   /** @type {any} */ meta: null,
   filter: "review",
   focus: 0,
   /** @type {Set<string>} */ approved: new Set(),
+  /** @type {Set<string>} */ selected: new Set(),
+  /** @type {string | undefined} */ anchor: undefined,
   /** @type {Map<string, any>} */ edited: new Map(),
   /** @type {string | null} */ open: null,
   rendering: false,
   /** @type {any} */ privacy: null,
+  poll: 0,
 };
 
 /** @type {ReturnType<typeof createI18n>} */
 let i18n;
+/** @type {ReturnType<typeof createSetup>} */
+let setup;
 const t = (/** @type {string} */ key, /** @type {Record<string, unknown>} */ params) => i18n.t(key, params);
 
-/**
- * @param {string} tag
- * @param {Record<string, any>} [attrs]
- * @param {...any} children
- */
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined || value === false || value === null) continue;
-    if (key === "class") el.className = value;
-    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-    else el.setAttribute(key, value === true ? "" : String(value));
-  }
-  for (const child of children.flat()) {
-    if (child === undefined || child === null || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
-  return el;
-}
-
-const $ = (/** @type {string} */ id) => /** @type {HTMLElement} */ (document.getElementById(id));
-
-/** Speaks a message to screen readers without moving focus. */
-function announce(/** @type {string} */ message) {
+/** Speaks a message to screen readers without moving focus. Unless `quiet`, it also stays on the page as the latest status. */
+function announce(/** @type {string} */ message, quiet = false) {
   const live = $("live");
   live.textContent = "";
   requestAnimationFrame(() => (live.textContent = message));
-  $("status").textContent = message;
+  if (!quiet) $("status").textContent = message;
 }
 
 const itemById = (/** @type {string} */ id) => state.items.find((i) => i.id === id);
 const shown = () => filterItems(state.items, state.filter);
+const shownIds = () => shown().map((i) => i.id);
+const selectedShown = () => shown().filter((i) => state.selected.has(i.id));
 const recipeFor = (/** @type {Item} */ item) => state.edited.get(item.id) ?? item.recipe;
 const sizeText = (/** @type {number} */ bytes) => formatBytes(bytes, i18n.locale);
 
@@ -92,21 +84,146 @@ async function loadPrivacy() {
   }
 }
 
+// ---------------------------------------------------------------- the three screens
+
+/** Shows the screen for the phase the server is in, and starts or stops watching an edit that is running. */
+async function applyWorkspace(/** @type {any} */ workspace, initial = false) {
+  const before = state.phase;
+  state.workspace = workspace;
+  state.phase = workspace.phase;
+  clearTimeout(state.poll);
+  $("setup").hidden = workspace.phase !== "setup";
+  $("progress").hidden = workspace.phase !== "running";
+  $("review").hidden = workspace.phase !== "review";
+  const changed = before !== workspace.phase && !initial;
+
+  if (workspace.phase === "review") {
+    if (before !== "review" || initial) await openReview(changed);
+    else renderAll();
+    return;
+  }
+  renderHeader();
+  if (workspace.phase === "setup") setup.showSetup(workspace);
+  else {
+    setup.showProgress(workspace);
+    state.poll = window.setTimeout(poll, POLL_MS);
+  }
+  if (changed) {
+    setup.focusHeading();
+    announce(t(`phase.${workspace.phase}`), true);
+  }
+}
+
+async function openReview(focusHeading = false) {
+  state.approved.clear();
+  state.edited.clear();
+  state.selected = new Set();
+  state.anchor = undefined;
+  state.focus = 0;
+  $("status").textContent = t("app.loading");
+  try {
+    await Promise.all([loadItems(false), loadPrivacy()]);
+    renderAll();
+    $("status").textContent = "";
+    if (focusHeading) {
+      $("review-title").focus();
+      announce(t("phase.review"), true);
+    }
+  } catch (error) {
+    $("status").textContent = t("app.failed", { message: /** @type {Error} */ (error).message });
+  }
+}
+
+async function poll() {
+  try {
+    const res = await api("/api/workspace");
+    if (res.ok) return await applyWorkspace(await res.json());
+  } catch {
+    // The program may be starting up its next step; try again below.
+  }
+  $("status").textContent = t("app.lost");
+  state.poll = window.setTimeout(poll, POLL_MS * 3);
+}
+
+async function refreshWorkspace() {
+  try {
+    const res = await api("/api/workspace");
+    if (res.ok) await applyWorkspace(await res.json());
+  } catch {
+    $("status").textContent = t("app.lost");
+  }
+}
+
+const hasPendingDecisions = () => state.approved.size > 0 || state.edited.size > 0;
+
+function askNewShoot() {
+  if (!hasPendingDecisions()) return void newShoot();
+  const dialog = /** @type {HTMLDialogElement} */ (
+    showDialog("confirm-dialog", t("newShoot.title"), [
+      h("p", {}, t("newShoot.body")),
+      h(
+        "div",
+        { class: "dialog-actions" },
+        h("button", { type: "button", onclick: () => dialog.close() }, t("newShoot.keep")),
+        h("button", { type: "button", class: "primary", onclick: () => (dialog.close(), void newShoot()) }, t("newShoot.confirm")),
+      ),
+    ])
+  );
+}
+
+async function newShoot() {
+  try {
+    const res = await postJson("/api/reset", {});
+    const body = await res.json();
+    if (!res.ok) return announce(t("app.error", { message: body.error ?? res.statusText }));
+    await applyWorkspace(body);
+  } catch (error) {
+    announce(t("app.error", { message: /** @type {Error} */ (error).message }));
+  }
+}
+
 // ---------------------------------------------------------------- rendering
 
+function renderSteps() {
+  const current = STEPS.indexOf(state.phase);
+  const nav = $("steps");
+  nav.setAttribute("aria-label", t("step.nav"));
+  nav.replaceChildren(
+    h(
+      "ol",
+      {},
+      STEPS.map((step, index) =>
+        h(
+          "li",
+          { "data-state": index < current ? "done" : index === current ? "active" : "pending", "aria-current": index === current ? "step" : undefined },
+          h("span", { class: "num", "aria-hidden": "true" }, index < current ? "✓" : index + 1),
+          h("span", {}, t(`step.${step}`)),
+        ),
+      ),
+    ),
+  );
+}
+
 function renderHeader() {
+  const review = state.phase === "review";
   document.documentElement.lang = i18n.locale;
-  document.title = t("app.title");
-  $("title").textContent = t("app.title");
-  $("job").textContent = state.meta ? t("app.job", { job: state.meta.job, adapter: state.meta.adapter }) : "";
-  $("skip").textContent = t("app.skip");
+  document.title = t(review ? "app.title" : state.phase === "running" ? "app.titleRunning" : "app.titleSetup");
+  $("tagline").textContent = t("app.tagline");
+  $("job").textContent = review && state.meta ? t("app.job", { job: state.meta.job, adapter: state.meta.adapter }) : "";
+  $("skip").textContent = t(review ? "app.skip" : "app.skipForm");
+  $("skip").setAttribute("href", review ? "#grid" : state.phase === "running" ? "#progress" : "#setup");
   $("lang-label").textContent = t("app.language");
   $("approve-all").textContent = t("action.approveAll");
   $("submit").textContent = t("action.submit");
+  $("new-shoot").textContent = t("action.newShoot");
   $("help-button").textContent = "?";
   $("help-button").setAttribute("aria-label", t("action.help"));
   $("privacy-button").textContent = privacyLabel();
   $("filters").setAttribute("aria-label", t("filter.nav"));
+  $("review-title").textContent = t("review.title");
+  $("privacy-button").hidden = !review;
+  $("new-shoot").hidden = !state.workspace?.canStart;
+  renderSteps();
 }
 
 function privacyLabel() {
@@ -140,6 +257,8 @@ function renderFilters() {
 function setFilter(/** @type {string} */ id) {
   state.filter = id;
   state.focus = 0;
+  state.selected = new Set();
+  state.anchor = undefined;
   renderAll();
   announce(t("status.filter", { label: t(`filter.${id}`), count: shown().length }));
 }
@@ -172,6 +291,7 @@ function stateText(/** @type {string} */ value) {
 function card(/** @type {Item} */ item, /** @type {boolean} */ focused) {
   const tab = focused ? 0 : -1;
   const approvedNow = state.approved.has(item.id);
+  const picked = state.selected.has(item.id);
   const actions = [];
   if (item.state === "review") {
     actions.push(
@@ -184,9 +304,12 @@ function card(/** @type {Item} */ item, /** @type {boolean} */ focused) {
   actions.push(
     h("button", { type: "button", class: "retouch", tabindex: tab, "aria-pressed": String(item.retouch === true), "aria-keyshortcuts": "r", onclick: () => toggleRetouch(item.id) }, item.retouch ? t("action.unretouch") : t("action.retouch")),
   );
+  const pick = h("input", { type: "checkbox", class: "pick-input", tabindex: tab, "aria-keyshortcuts": "x", "aria-label": t("select.photo", { name: item.id }), onclick: (/** @type {MouseEvent} */ event) => toggleSelect(item.id, event.shiftKey) });
+  /** @type {HTMLInputElement} */ (pick).checked = picked;
   return h(
     "li",
-    { class: `card${focused ? " focused" : ""}`, "data-id": item.id, "data-state": item.state },
+    { class: `card${focused ? " focused" : ""}${picked ? " selected" : ""}`, "data-id": item.id, "data-state": item.state },
+    h("label", { class: "pick" }, pick, h("span", { class: "box", "aria-hidden": "true" })),
     h(
       "button",
       { type: "button", class: "thumb", tabindex: tab, "aria-label": t("action.open", { name: item.id }), onclick: () => openDetail(item.id) },
@@ -212,10 +335,39 @@ function renderGrid() {
   grid.replaceChildren(...list.map((item, index) => card(item, index === state.focus)));
 }
 
+/** "Select all", how many are ticked, and what can be done with them. */
+function renderToolbar() {
+  const ids = shownIds();
+  const chosen = selectedShown();
+  const mode = coverage(state.selected, ids);
+  const all = h("input", { type: "checkbox", id: "select-all", disabled: ids.length === 0, "aria-keyshortcuts": "Control+A", onchange: toggleSelectAll });
+  /** @type {HTMLInputElement} */ (all).checked = mode === "all";
+  /** @type {HTMLInputElement} */ (all).indeterminate = mode === "some";
+  const canApprove = chosen.some((i) => i.state === "review" && !state.approved.has(i.id));
+  const canFlag = chosen.some((i) => !i.retouch);
+  const canUnflag = chosen.some((i) => i.retouch);
+  const toolbar = $("toolbar");
+  toolbar.setAttribute("aria-label", t("select.toolbar"));
+  toolbar.replaceChildren(
+    h("label", { class: "select-all" }, all, h("span", {}, t("select.all"))),
+    h("span", { class: "selected-count" }, chosen.length ? t("select.count", { count: chosen.length }) : t("select.hint")),
+    h(
+      "div",
+      { class: "bulk-actions" },
+      h("button", { type: "button", id: "bulk-approve", class: "approve", disabled: !canApprove, onclick: approveSelected }, t("select.approve")),
+      h("button", { type: "button", id: "bulk-flag", class: "retouch", disabled: !canFlag, onclick: () => flagSelected(true) }, t("select.flag")),
+      h("button", { type: "button", id: "bulk-unflag", disabled: !canUnflag, onclick: () => flagSelected(false) }, t("select.unflag")),
+      h("button", { type: "button", id: "bulk-clear", disabled: chosen.length === 0, onclick: clearSelection }, t("select.clear")),
+    ),
+  );
+}
+
 function renderAll() {
+  state.selected = keepKnown(state.selected, shownIds());
   renderHeader();
   renderBanner();
   renderFilters();
+  renderToolbar();
   renderGrid();
   const waiting = state.items.filter((i) => i.state === "review").length;
   $("summary").textContent = `${t("app.awaiting", { count: waiting })} · ${t("app.shown", { count: shown().length })}`;
@@ -259,6 +411,58 @@ function approveAllShown() {
   rerenderKeepingFocus();
 }
 
+function toggleSelect(/** @type {string} */ id, shift = false) {
+  state.selected = shift ? selectRange(state.selected, shownIds(), state.anchor, id) : toggle(state.selected, id);
+  state.anchor = id;
+  const index = shown().findIndex((i) => i.id === id);
+  if (index >= 0) state.focus = index;
+  announce(t("select.count", { count: selectedShown().length }));
+  rerenderKeepingFocus();
+}
+
+function toggleSelectAll() {
+  state.selected = toggleAll(state.selected, shownIds());
+  state.anchor = undefined;
+  announce(selectedShown().length ? t("select.count", { count: selectedShown().length }) : t("status.selectionCleared"));
+  rerenderKeepingFocus();
+}
+
+function clearSelection() {
+  if (state.selected.size === 0) return;
+  state.selected = new Set();
+  state.anchor = undefined;
+  announce(t("status.selectionCleared"));
+  rerenderKeepingFocus();
+}
+
+function approveSelected() {
+  const ids = selectedShown().filter((i) => i.state === "review" && !state.approved.has(i.id)).map((i) => i.id);
+  for (const id of ids) state.approved.add(id);
+  announce(t("status.approvedAll", { count: ids.length }));
+  rerenderKeepingFocus();
+}
+
+/** Flags (or unflags) every ticked photo that is not already so; a photo already flagged keeps its note. */
+async function flagSelected(/** @type {boolean} */ on) {
+  const ids = selectedShown().filter((i) => (i.retouch === true) !== on).map((i) => i.id);
+  if (ids.length === 0) return;
+  try {
+    const res = await postJson("/api/retouch", { ids, on });
+    const body = await res.json();
+    if (!res.ok) return announce(t("app.error", { message: body.error ?? res.statusText }));
+    for (const id of body.done) {
+      const item = itemById(id);
+      if (!item) continue;
+      item.retouch = on;
+      if (!on) delete item.retouchNote;
+    }
+    announce(t(on ? "status.flaggedMany" : "status.unflaggedMany", { count: body.done.length }));
+  } catch (error) {
+    announce(t("app.error", { message: /** @type {Error} */ (error).message }));
+  }
+  rerenderKeepingFocus();
+}
+
 async function toggleRetouch(/** @type {string} */ id, /** @type {string | undefined} */ note) {
   const item = itemById(id);
   if (!item) return;
@@ -291,14 +495,24 @@ async function submit() {
   state.edited.clear();
   await Promise.all([loadItems(), loadPrivacy()]);
   renderAll();
-  announce(t("app.done", { exported: body.exported, approved: body.approved, failed: body.failed }));
+  const done = t("app.done", { exported: body.exported, approved: body.approved, failed: body.failed });
+  announce(body.exported > 0 && state.meta?.exportDir ? `${done} ${t("app.savedTo", { folder: state.meta.exportDir })}` : done);
 }
 
+/** Redraws the page after a change and puts the keyboard back where it was, on the same photo's checkbox, button or toolbar control. */
 function rerenderKeepingFocus() {
-  const hadFocusInGrid = $("grid").contains(document.activeElement);
+  const active = document.activeElement;
+  const inToolbar = active instanceof HTMLElement && $("toolbar").contains(active) ? active.id : "";
+  const onCard = active instanceof HTMLElement && active.classList.contains("pick-input") ? active.closest("li")?.getAttribute("data-id") : undefined;
+  const hadFocusInGrid = $("grid").contains(active);
   renderAll();
   if (state.open) refreshDetailButtons();
-  if (hadFocusInGrid) /** @type {HTMLElement | null} */ ($("grid").children[state.focus]?.querySelector(".thumb"))?.focus();
+  if (inToolbar) {
+    const again = document.getElementById(inToolbar);
+    /** @type {HTMLElement | null} */ (again instanceof HTMLButtonElement && again.disabled ? document.getElementById("select-all") : again)?.focus();
+  } else if (onCard) {
+    /** @type {HTMLElement | null} */ ($("grid").querySelector(`li[data-id="${CSS.escape(onCard)}"] .pick-input`))?.focus();
+  } else if (hadFocusInGrid) /** @type {HTMLElement | null} */ ($("grid").children[state.focus]?.querySelector(".thumb"))?.focus();
 }
 
 // ---------------------------------------------------------------- detail view
@@ -478,6 +692,7 @@ function showPrivacy() {
 function showHelp() {
   const rows = [
     ["←  →  ↑  ↓", "help.arrows"], ["Enter", "help.open"], ["Esc", "help.close"], ["A", "help.approve"], ["Shift + A", "help.approveAll"], ["R", "help.retouch"],
+    ["X", "help.select"], ["Shift + click", "help.range"], ["Ctrl + A", "help.selectAll"], ["Esc", "help.clear"],
     ["B", "help.restore"], ["C", "help.compare"], ["←  →", "help.prev"], ["1 – 6", "help.filters"], ["?", "help.help"],
   ];
   const list = h("dl", { class: "keys" });
@@ -494,6 +709,7 @@ function showDialog(/** @type {string} */ id, /** @type {string} */ title, /** @
   dialog.addEventListener("close", () => dialog.remove());
   document.body.append(dialog);
   dialog.showModal();
+  return dialog;
 }
 
 // ---------------------------------------------------------------- keyboard
@@ -504,7 +720,7 @@ function typing(/** @type {EventTarget | null} */ target) {
 }
 
 function onKey(/** @type {KeyboardEvent} */ event) {
-  if (event.altKey || event.metaKey) return;
+  if (event.altKey) return;
   if (event.key === "Escape") {
     // Closes the topmost window ourselves: the browser's own handling does not reach a dialog when focus is on the page body.
     const dialogs = document.querySelectorAll("dialog[open]");
@@ -513,6 +729,10 @@ function onKey(/** @type {KeyboardEvent} */ event) {
       event.preventDefault();
       top.close();
       return;
+    }
+    if (state.phase === "review" && state.selected.size > 0 && !typing(event.target)) {
+      event.preventDefault();
+      return clearSelection();
     }
   }
   if (typing(event.target)) return;
@@ -525,6 +745,12 @@ function onKey(/** @type {KeyboardEvent} */ event) {
     event.preventDefault();
     return showHelp();
   }
+  if (state.phase !== "review") return;
+  if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === "a" && !open) {
+    event.preventDefault();
+    return toggleSelectAll();
+  }
+  if (event.metaKey) return;
   const list = shown();
   const current = open ? state.open : list[state.focus]?.id;
   if (open) {
@@ -562,6 +788,10 @@ function onKey(/** @type {KeyboardEvent} */ event) {
     event.preventDefault();
     return void toggleRetouch(current);
   }
+  if (key.toLowerCase() === "x" && !event.ctrlKey && !open) {
+    event.preventDefault();
+    return toggleSelect(current);
+  }
   if (key.toLowerCase() === "b" && !event.ctrlKey && itemById(current)?.state === "rejected") {
     event.preventDefault();
     return void restore([current]);
@@ -587,27 +817,47 @@ async function start() {
     announce(t("status.closed"));
   });
 
+  setup = createSetup({
+    t,
+    get: (path) => api(path),
+    post: (path, body) => postJson(path, body),
+    announce,
+    setupRoot: $("setup"),
+    progressRoot: $("progress"),
+    onWorkspace: (workspace) => void applyWorkspace(workspace),
+    refresh: () => void refreshWorkspace(),
+  });
+
   const select = /** @type {HTMLSelectElement} */ ($("lang"));
   select.replaceChildren(...Object.entries(LANGUAGE_NAMES).map(([code, name]) => h("option", { value: code, lang: code, selected: code === i18n.locale }, name)));
   select.addEventListener("change", () => {
     i18n.setLocale(select.value);
     localStorage.setItem("vivah-lang", select.value);
-    renderAll();
+    $("status").textContent = "";
+    if (state.phase === "review") renderAll();
+    else {
+      renderHeader();
+      setup.relabel();
+    }
     if (state.open) buildDetail();
   });
 
   $("approve-all").addEventListener("click", approveAllShown);
   $("submit").addEventListener("click", submit);
+  $("new-shoot").addEventListener("click", askNewShoot);
   $("help-button").addEventListener("click", showHelp);
   $("privacy-button").addEventListener("click", showPrivacy);
   document.addEventListener("keydown", onKey);
-  window.addEventListener("resize", () => renderGrid());
+  window.addEventListener("resize", () => state.phase === "review" && renderGrid());
+  // The toolbar sticks under the header, which is taller when its controls wrap onto a second line.
+  new ResizeObserver(() => document.documentElement.style.setProperty("--bar-height", `${document.querySelector("header.bar")?.getBoundingClientRect().height ?? 0}px`)).observe(/** @type {Element} */ (document.querySelector("header.bar")));
 
   $("status").textContent = t("app.loading");
   try {
-    await Promise.all([loadItems(false), loadPrivacy()]);
-    renderAll();
+    const res = await api("/api/workspace");
+    if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
     $("status").textContent = "";
+    await applyWorkspace(await res.json(), true);
   } catch (error) {
     $("status").textContent = t("app.failed", { message: /** @type {Error} */ (error).message });
   }

@@ -47,7 +47,7 @@ import {
 import { DecodePool, defaultDecodeWorkers, loadPreview, scanFolder } from "@vivahlens/ingest";
 import { createPreviewRenderer, RenderAdapter } from "@vivahlens/render";
 import { writeZip } from "@vivahlens/delivery";
-import { startReviewServer } from "@vivahlens/review";
+import { startReviewServer, startStudioServer, FieldError, type ReviewDeps, type ReviewServer, type StartRequest, type StudioWorkflow } from "@vivahlens/review";
 import {
   analyzeClip,
   analyzeMusic,
@@ -89,6 +89,8 @@ export interface CliContext {
   run?: ProcessRunner;
   /** Launches the program that shows a desktop notification, which takes its text on standard input; tests inject a fake. */
   notifier?: Runner;
+  /** Opens the review page in the person's browser. The binary supplies it; tests leave it out so nothing is opened. */
+  openUrl?(url: string): Promise<void> | void;
 }
 
 const info = (ctx: CliContext, line: string): void => (ctx.info ?? ctx.log)(line);
@@ -109,7 +111,11 @@ const USAGE = `vivah: AI editing automation (local-first)
                                                                     (--offline: no model; reuses edits already made to the same files)
   vivah undo   (--folder <dir> | --job <id>) [--dry-run] [--force] [--photos a.cr3,b.cr3]
                                                                     take a job's edits back out of your files (sidecars restored)
-  vivah review --folder <dir> --profile <file> [--export-dir <dir>]  open the local review UI (approve, adjust, export)
+  vivah review [--folder <dir> --profile <file>] [--export-dir <dir>] [--no-open]
+                                                                    open the local review UI in your browser. With no --folder and --profile
+                                                                    it opens a page where you choose the photos, the output folder and your
+                                                                    style photos, start the edit, then review (default there: --adapter render,
+                                                                    and the offline demo model unless you pass --provider)
   vivah export --folder <dir> (--approve a.cr3,b.cr3 | --approve-all) [--export-dir <dir>]
                                                                     approve/export from the command line
   vivah deliver --folder <jpegs> --out <dir> [--preset web|social|album|print] [--zip]
@@ -188,6 +194,7 @@ const OPTIONS = {
   "plugin-wait": { type: "string" },
   "retry-failed": { type: "boolean" },
   offline: { type: "boolean" },
+  "no-open": { type: "boolean" },
   perceptual: { type: "boolean" },
   notify: { type: "boolean" },
   force: { type: "boolean" },
@@ -235,7 +242,9 @@ export function joinNegativeNumbers(argv: readonly string[]): string[] {
 /** Entry point shared by the binary and tests. Returns the process exit code. */
 export async function runCli(argv: readonly string[], ctx: CliContext): Promise<number> {
   try {
-    const { values, positionals } = parseArgs({ args: joinNegativeNumbers(argv), options: OPTIONS, allowPositionals: true });
+    const { values, positionals, tokens } = parseArgs({ args: joinNegativeNumbers(argv), options: OPTIONS, allowPositionals: true, tokens: true });
+    // Options that have a default (--provider, --adapter) cannot tell "not given" from "given the default"; the page needs to.
+    const given = new Set(tokens.flatMap((token) => (token.kind === "option" ? [token.name] : [])));
     const command = positionals[0];
     if (values.help || !command) {
       ctx.log(USAGE);
@@ -247,7 +256,7 @@ export async function runCli(argv: readonly string[], ctx: CliContext): Promise<
       case "edit":
         return await edit(values, ctx);
       case "review":
-        return await review(values, ctx);
+        return await review(values, ctx, given);
       case "export":
         return await exportCmd(values, ctx);
       case "deliver":
@@ -455,7 +464,7 @@ async function announceCost(v: Args, ctx: CliContext, photos: number, prices?: P
   }
 }
 
-async function edit(v: Args, ctx: CliContext): Promise<number> {
+async function edit(v: Args, ctx: CliContext, onProgress?: (event: { stage: string; done: number; total: number }) => void): Promise<number> {
   const folder = need(v.folder, "folder");
   const profile = await loadProfile(need(v.profile, "profile"));
   const assets = await scanFolder(folder);
@@ -491,6 +500,7 @@ async function edit(v: Args, ctx: CliContext): Promise<number> {
     const analysis = new AnalysisCache(pool && ((a) => pool!.analysis(a)));
     if (!(await adapter.detect())) throw new VivahError("ADAPTER_EDITOR_NOT_RUNNING", `${adapter.id} was not found on this machine`);
     info(ctx, v.offline ? `Editing ${assets.length} photo(s) with "${adapter.id}" without the model.` : `Editing ${assets.length} photo(s) with "${adapter.id}". Previews (≤2048px, EXIF/GPS stripped) go to "${v.provider}"; originals stay put.`);
+    const printProgress = progressPrinter((line) => info(ctx, line));
     const summary = await runJob(
       {
         store,
@@ -506,7 +516,10 @@ async function edit(v: Args, ctx: CliContext): Promise<number> {
         // Enough photos in flight to keep every decoder busy; one thread cannot use more than a few at once.
         concurrency: v.concurrency ? Number(v.concurrency) : Math.max(4, pool ? workers : 0),
         signal: ctx.signal,
-        onProgress: progressPrinter((line) => info(ctx, line)),
+        onProgress: (event) => {
+          printProgress(event);
+          onProgress?.(event);
+        },
         logger: log.logger,
       },
       { id, name: path.basename(folder), assets, retryFailed: v["retry-failed"] },
@@ -560,7 +573,11 @@ async function remoteSettings(v: Args, ctx: CliContext, adapterId: string, opera
   return remote.config;
 }
 
-async function review(v: Args, ctx: CliContext): Promise<number> {
+/**
+ * Opens what the review page needs for one job: the editor, the database, the license check and the delivery plan. The page's
+ * server frees it through `dispose` when it moves on to another shoot or stops, and `dispose` is safe to call twice.
+ */
+async function openReviewSession(v: Args, ctx: CliContext): Promise<ReviewDeps> {
   const folder = need(v.folder, "folder");
   const profileFile = need(v.profile, "profile");
   const profile = await loadProfile(profileFile);
@@ -569,13 +586,23 @@ async function review(v: Args, ctx: CliContext): Promise<number> {
   info(ctx, license.line);
   await remoteSettings(v, ctx, adapterName(v), "export");
   const { adapter, dispose } = await openAdapter(v, ctx);
-  warnIfNothingExported(delivery, adapter, ctx);
-  const store = await openStore(v, ctx);
-  const log = await openCommandLog(ctx.env, "review", (line) => info(ctx, line));
+  let store: SqliteStore | undefined;
+  let log: Awaited<ReturnType<typeof openCommandLog>> | undefined;
+  let closed = false;
+  const release = async () => {
+    if (closed) return;
+    closed = true;
+    store?.close();
+    await dispose();
+    await log?.close();
+  };
   try {
-    const server = await startReviewServer({
-      store,
-      library: store,
+    warnIfNothingExported(delivery, adapter, ctx);
+    const opened = (store = await openStore(v, ctx));
+    log = await openCommandLog(ctx.env, "review", (line) => info(ctx, line));
+    return {
+      store: opened,
+      library: opened,
       logger: log.logger,
       jobId: jobId(v, folder),
       assets: await scanFolder(folder),
@@ -587,22 +614,141 @@ async function review(v: Args, ctx: CliContext): Promise<number> {
       exportSpec: delivery?.spec,
       afterExport: delivery?.afterExport,
       onProfileUpdated: async (p) => {
-        store.saveProfile(p);
+        opened.saveProfile(p);
         await fs.writeFile(profileFile, JSON.stringify(p, null, 2), "utf8");
         ctx.log(`Style "${p.name}" updated from your adjustments (v${p.version}).`);
       },
-    });
+      dispose: release,
+    };
+  } catch (err) {
+    await release();
+    throw err;
+  }
+}
+
+/** The providers the page offers; one given on the command line is offered too, even if it needs more than a name and a key. */
+const PAGE_PROVIDERS = ["mock", "openai", "anthropic", "gemini", "ollama"];
+/** The editor routes that export finished JPEGs, which is what the output folder is for. */
+const EXPORTING_ADAPTERS = new Set(["render", "rawtherapee", "darktable"]);
+
+/**
+ * What the review page does when it is opened without a job: learn the style from the folder of finished photos, edit the
+ * folder of photos, and open the result for review. It is `learn`, `edit` and `review` run one after another with the choices
+ * the person made on the page, so a license, a model price cap or a missing key stops it exactly as it would on the command line.
+ * Without --adapter and --provider on the command line it uses the built-in renderer (which exports to the output folder) and
+ * the offline demo model (which sends nothing anywhere): a cloud model is only used when the person picks one.
+ */
+function studioWorkflow(v: Args, ctx: CliContext, given: ReadonlySet<string>): StudioWorkflow {
+  const adapter = given.has("adapter") ? (v.adapter ?? "render") : "render";
+  const provider = given.has("provider") ? (v.provider ?? "mock") : "mock";
+  const outputUsed = EXPORTING_ADAPTERS.has(adapter);
+  const providers = [...new Set([...PAGE_PROVIDERS, provider])].map((id) => ({ id, needsModel: id !== "mock", local: id === "mock" || id === "ollama" }));
+  const countPhotos = async (folder: string): Promise<number> => (await scanFolder(folder).catch(() => [])).length;
+
+  const checkFolder = async (field: "input" | "profile", folder: string): Promise<void> => {
+    if (!path.isAbsolute(folder)) throw new FieldError(field, "Enter the full path of a folder.");
+    const found = await fs.stat(folder).catch(() => undefined);
+    if (!found) throw new FieldError(field, "This folder was not found.");
+    if (!found.isDirectory()) throw new FieldError(field, "This is not a folder.");
+    if ((await countPhotos(folder)) === 0) throw new FieldError(field, "No photos in this folder. They must be directly inside it, not in a sub-folder.");
+  };
+
+  return {
+    setup: {
+      defaults: {
+        ...(v.folder && { input: v.folder }),
+        ...(v["export-dir"] && { output: v["export-dir"] }),
+        ...(v.refs && { profile: v.refs }),
+        provider,
+        ...(given.has("provider") && v.model && { model: v.model }),
+      },
+      providers,
+      outputUsed,
+      maxReferences: MAX_REFERENCES,
+    },
+    countPhotos,
+    async validate(request: StartRequest) {
+      await checkFolder("input", request.input);
+      await checkFolder("profile", request.profile);
+      if (outputUsed) {
+        const output = request.output?.trim();
+        if (!output) throw new FieldError("output", "Choose where to save the edited photos.");
+        if (!path.isAbsolute(output)) throw new FieldError("output", "Enter the full path of a folder.");
+        const found = await fs.stat(output).catch(() => undefined);
+        if (found && !found.isDirectory()) throw new FieldError("output", "This is not a folder.");
+        if (await sameDirectory(request.input, output)) throw new FieldError("output", "Choose a different folder from the photos: exports never replace your original files.");
+      }
+      const chosen = request.provider ?? provider;
+      const known = providers.find((p) => p.id === chosen);
+      if (!known) throw new FieldError("provider", `Unknown model provider "${chosen}".`);
+      if (known.needsModel && !request.model?.trim()) throw new FieldError("model", "Enter the model name.");
+    },
+    async start(request, hooks) {
+      const name = path.basename(request.profile) || "style";
+      const profileFile = path.join(dataDir(ctx.env), "styles", `${slug(name)}.profile.json`);
+      await fs.mkdir(path.dirname(profileFile), { recursive: true });
+      const chosen = request.provider ?? provider;
+      const run: Args = {
+        ...v,
+        adapter,
+        provider: chosen,
+        model: chosen === "mock" ? undefined : request.model?.trim(),
+        folder: request.input,
+        refs: request.profile,
+        name,
+        out: profileFile,
+        profile: profileFile,
+        "export-dir": outputUsed ? request.output?.trim() : undefined,
+        job: undefined,
+        // Starting again means "do it": photos that failed last time are tried again.
+        "retry-failed": true,
+      };
+      const say = (line: string) => {
+        hooks.log(line);
+        info(ctx, line);
+      };
+      const signal = AbortSignal.any(ctx.signal ? [hooks.signal, ctx.signal] : [hooks.signal]);
+      const step: CliContext = { ...ctx, log: say, info: say, signal };
+
+      hooks.progress({ stage: "learning", done: 0, total: 1 });
+      if ((await learn(run, step)) !== 0) throw new Error("The style could not be learned.");
+      signal.throwIfAborted();
+      hooks.progress({ stage: "learning", done: 1, total: 1 });
+      await edit(run, step, (event) => hooks.progress(event));
+      signal.throwIfAborted();
+      return openReviewSession(run, step);
+    },
+  };
+}
+
+async function review(v: Args, ctx: CliContext, given: ReadonlySet<string>): Promise<number> {
+  const workflow = studioWorkflow(v, ctx, given);
+  // With a folder and a profile on the command line the page opens on the photos; otherwise it starts by asking for them.
+  const session = v.folder !== undefined && v.profile !== undefined ? await openReviewSession(v, ctx) : undefined;
+  let server: ReviewServer;
+  try {
+    server = session ? await startReviewServer(session, { workflow }) : await startStudioServer(workflow);
+  } catch (err) {
+    await session?.dispose?.();
+    throw err;
+  }
+  try {
     ctx.log(`Review UI (local only): ${server.url}\nPress Ctrl-C to stop.`);
+    if (!v["no-open"] && ctx.openUrl) {
+      const problem = await Promise.resolve(ctx.openUrl(server.url)).then(
+        () => undefined,
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+      if (problem) info(ctx, `Could not open your browser (${problem}). Open the address above yourself.`);
+    }
     await new Promise<void>((resolve) => {
       if (ctx.signal?.aborted) return resolve();
       ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
     });
-    await server.close();
     return 0;
   } finally {
-    store.close();
-    await dispose();
-    await log.close();
+    // Stops an edit that is still running and frees the job that is open.
+    await server.close();
   }
 }
 
