@@ -74,6 +74,38 @@ describe("vivah CLI (mock provider)", () => {
     expect(JSON.parse(readFileSync(out, "utf8")).baseAdjustments).toEqual({ exposure: 0.4, contrast: 15 });
   });
 
+  it("gives a style learned again from other photos the next version, and edits a finished job in it only with --restyle", async () => {
+    const [refsA, refsB, folder] = ["look-a", "look-b", "restyle-shoot"].map((name) => path.join(root, name));
+    for (const dir of [refsA, refsB, folder]) mkdirSync(dir);
+    writeFileSync(path.join(refsA, "ref.jpg"), photo({ sharp: true }));
+    writeFileSync(path.join(refsB, "ref.jpg"), photo({ sharp: true, reverse: true }));
+    writeFileSync(path.join(folder, "a.jpg"), photo({ sharp: true }));
+    const look = path.join(root, "look.profile.json");
+    const jobs = path.join(root, "restyle.db");
+    const learn = (from: string) => cli(["learn", "--refs", from, "--name", "Look", "--out", look, "--provider", "mock", "--db", jobs]);
+    const edit = (...extra: string[]) => cli(["edit", "--folder", folder, "--profile", look, "--provider", "mock", "--adapter", "render", "--db", jobs, ...extra]);
+    const saved = () => JSON.parse(readFileSync(look, "utf8")) as { version: number; learnedFrom: string };
+
+    expect((await learn(refsA)).code).toBe(0);
+    const first = saved();
+    expect(first.version).toBe(1);
+    expect((await edit()).out).toContain("1 ready for review");
+
+    // The same photos again are the same style; other photos are not, even under the same name.
+    expect((await learn(refsA)).out).not.toContain("(version");
+    expect(saved()).toEqual(first);
+    expect((await learn(refsB)).out).toContain("(version 2)");
+    expect(saved().learnedFrom).not.toBe(first.learnedFrom);
+
+    const left = await edit();
+    expect(left.out).toContain("1 photo(s) were edited in a different style and were left as they are");
+    expect(left.out).toContain("LLM calls: 0");
+    const redone = await edit("--restyle");
+    expect(redone.out).toContain("edited again in this style: 1 photo(s)");
+    expect(redone.out).toContain("LLM calls: 1");
+    expect((await edit("--restyle")).out).toContain("LLM calls: 0");
+  });
+
   it("approves on an edit-only adapter and tells the user to export from their editor", async () => {
     const r = await cli(["export", "--folder", shoot, "--approve", "a.jpg", "--db", db, "--job", "j"]);
     expect(r.code).toBe(0);

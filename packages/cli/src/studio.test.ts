@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import jpeg from "jpeg-js";
@@ -186,6 +188,71 @@ describe("vivah review with a folder and a profile", () => {
       expect(await (await p.post("/api/reset")).json()).toMatchObject({ phase: "setup" });
     } finally {
       expect(await p.stop()).toBe(0);
+    }
+  });
+});
+
+describe("the same folders edited again with another model", () => {
+  const bwRefs = path.join(root, "bw");
+  const wedding = path.join(root, "wedding");
+  const edited = path.join(root, "wedding-edited");
+  for (const dir of [bwRefs, wedding]) mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(bwRefs, "ref1.jpg"), photo({ sharp: true }));
+  writeFileSync(path.join(wedding, "a.jpg"), photo({ sharp: true }));
+  writeFileSync(path.join(wedding, "b.jpg"), photo({ sharp: true, reverse: true }));
+
+  it("edits the photos again in the style the new model learned, instead of showing the demo edits, and then carries on without asking again", async () => {
+    // A model on this computer that sees black and white in the style photos; it counts what it is asked.
+    const asked = { style: 0, recipe: 0 };
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const wantsStyle = Buffer.concat(chunks).toString().includes("analyze a photographer");
+        asked[wantsStyle ? "style" : "recipe"]++;
+        const content = wantsStyle ? { summary: "black and white", baseAdjustments: { saturation: -100 } } : { adjustments: { exposure: 0.1 }, confidence: 0.8 };
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { prompt_tokens: 500, completion_tokens: 20 } }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
+
+    const p = await page(["--db", path.join(root, "restyle.db"), "--provider", "openai-compatible", "--base-url", base, "--model", "local-vlm"]);
+    type Listed = { items: { id: string; state: string; recipe?: { adjustments: { saturation?: number; exposure?: number } } }[] };
+    const listed = async () => Object.fromEntries(((await (await p.api("/api/items")).json()) as Listed).items.map((i) => [i.id, i]));
+    const styleFile = () => JSON.parse(readFileSync(path.join(home, "styles", "bw.profile.json"), "utf8")) as { version: number; summary: string; learnedFrom?: string };
+    try {
+      // First the demo, as a first try would be: both photos get the sample edit, and one is approved and exported.
+      expect((await p.post("/api/start", { input: wedding, output: edited, profile: bwRefs, provider: "mock" })).status).toBe(202);
+      await p.phase("review");
+      expect((await listed())["a.jpg"]!.recipe!.adjustments).toMatchObject({ exposure: 0.3 });
+      expect(await (await p.post("/api/decide", { approve: ["a.jpg"], overrides: {} })).json()).toMatchObject({ exported: 1 });
+      expect(styleFile()).toMatchObject({ version: 1, summary: "mock style: warm, slightly lifted shadows" });
+      expect(asked).toEqual({ style: 0, recipe: 0 });
+
+      // Then the same folders with a real model.
+      await p.post("/api/reset");
+      expect((await p.post("/api/start", { input: wedding, output: edited, profile: bwRefs, provider: "openai-compatible", model: "local-vlm" })).status).toBe(202);
+      await p.phase("review");
+      expect(asked).toEqual({ style: 1, recipe: 2 });
+      expect(styleFile()).toMatchObject({ version: 2, summary: "black and white" });
+      const redone = await listed();
+      expect([redone["a.jpg"]!.state, redone["b.jpg"]!.state]).toEqual(["review", "review"]);
+      expect(redone["a.jpg"]!.recipe!.adjustments.saturation).toBe(-100);
+      expect(redone["b.jpg"]!.recipe!.adjustments.saturation).toBe(-100);
+      expect(p.lines.join("\n")).toContain("edited again in this style: 2 photo(s)");
+
+      // Starting once more with the same choices is a resume: the style is not learned again and no photo is asked about.
+      await p.post("/api/reset");
+      expect((await p.post("/api/start", { input: wedding, output: edited, profile: bwRefs, provider: "openai-compatible", model: "local-vlm" })).status).toBe(202);
+      await p.phase("review");
+      expect(asked).toEqual({ style: 1, recipe: 2 });
+      expect(styleFile().version).toBe(2);
+      expect(p.lines.join("\n")).toContain('Style "bw" is already learned from these photos with this model (version 2); using it.');
+    } finally {
+      expect(await p.stop()).toBe(0);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

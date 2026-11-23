@@ -47,6 +47,8 @@ export interface JobItem {
   styleMatch?: { exemplarIds: string[] };
   /** Where the proposed recipe came from: the model, an earlier reviewer-approved edit, or the recipe cache. */
   recipeSource?: "llm" | "override" | "cache";
+  /** The style the recipe was proposed for (`styleLineage` of the profile), so a later run in another style can tell. */
+  recipeStyle?: string;
   /** Where the delivered file went: a folder, an sftp:// URL or a gallery link. */
   deliveredTo?: string;
   /** Things the editor adapter could not honour but did not treat as errors, shown to the reviewer. */
