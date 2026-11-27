@@ -16,6 +16,7 @@
   "app.skipForm": "Skip to the main content",
   "app.lost": "Lost contact with VivahLens. Trying again…",
   "app.savedTo": "Saved to {folder}.",
+  "app.setAside": "{count, plural, one {# photo was set aside as blurry or a duplicate — click ‘Set aside’ to see it and bring it back.} other {# photos were set aside as blurry or duplicates — click ‘Set aside’ to see them and bring them back.}}",
 
   "step.nav": "Steps",
   "step.setup": "Choose folders",
@@ -47,7 +48,7 @@
   "state.failed": "Failed",
 
   "reason.blurry": "it is out of focus",
-  "reason.duplicate": "a better frame of the same moment was kept",
+  "reason.duplicate": "it looks very similar to another photo and the sharper one was kept",
   "reason.duplicate-file": "the same file was already in the job",
 
   "action.approve": "Approve",
@@ -90,8 +91,9 @@
   "setup.check.willCreate": "This folder does not exist yet. It will be created.",
   "setup.check.outputHasPhotos": "{count, plural, one {This folder already has # photo. A new photo with the same name will replace it.} other {This folder already has # photos. New photos with the same names will replace them.}}",
   "setup.advanced": "Advanced options",
-  "setup.model.label": "AI model",
-  "setup.model.mock": "Offline demo (nothing is sent anywhere)",
+  "setup.model.label": "Edit with",
+  "setup.model.local": "Your style photos, measured on this computer (no AI service)",
+  "setup.model.mock": "Sample edit for trying things out (ignores your style photos)",
   "setup.model.openai": "OpenAI",
   "setup.model.anthropic": "Anthropic",
   "setup.model.gemini": "Google Gemini",
@@ -100,7 +102,8 @@
   "setup.model.openai-compatible": "OpenAI-compatible server",
   "setup.modelName.label": "Model name",
   "setup.modelName.help": "The model to use, as your provider names it.",
-  "setup.model.demoNote": "Demo mode: every photo gets the same sample edit. Choose a real AI model under Advanced options to edit for real.",
+  "setup.model.demoNote": "Sample mode: every photo gets the same sample edit and your style photos are not used. Choose another way to edit under Advanced options.",
+  "setup.model.localNote": "Your style photos are measured on this computer: black and white or toned, contrast, how colourful, the colour of shadows and highlights, and the crop shape. Each photo is then edited to match. Nothing is sent anywhere. It does not retouch or reframe on a subject; an AI model under Advanced options can add judgement about each photo.",
   "setup.model.cloudNote": "Reduced previews without location data are sent to {provider}. Its key must be set in the environment before VivahLens is started.",
   "setup.start": "Start editing",
   "setup.starting": "Starting…",
@@ -179,6 +182,7 @@
   "editing.paused.device": "Editing is paused: this computer is no longer activated. You can still approve and export. Run “vivah activate” to use this computer again.",
 
   "source.llm": "the model",
+  "source.measured": "matching your style photos",
   "source.override": "your earlier edit",
   "source.cache": "an earlier run",
 

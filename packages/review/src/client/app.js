@@ -21,7 +21,7 @@ const postJson = (/** @type {string} */ path, /** @type {unknown} */ body, /** @
   api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), ...(signal && { signal }) });
 
 /**
- * @typedef {{ id: string, state: string, recipe?: { adjustments: Record<string, any>, sourceStyleProfileId?: string }, unsupported: string[], warnings: string[],
+ * @typedef {{ id: string, state: string, edit?: string, recipe?: { adjustments: Record<string, any>, sourceStyleProfileId?: string }, unsupported: string[], warnings: string[],
  *   rejectReason?: string, restoredFrom?: string, errorMessage?: string, outlierFields: string[], seenBefore?: string, retouch?: boolean, retouchNote?: string, recipeSource?: string }} Item
  */
 
@@ -124,7 +124,8 @@ async function openReview(focusHeading = false) {
   try {
     await Promise.all([loadItems(false), loadPrivacy()]);
     renderAll();
-    $("status").textContent = "";
+    const setAside = state.items.filter((i) => i.state === "rejected").length;
+    $("status").textContent = setAside > 0 ? t("app.setAside", { count: setAside }) : "";
     if (focusHeading) {
       $("review-title").focus();
       announce(t("phase.review"), true);
@@ -313,7 +314,8 @@ function card(/** @type {Item} */ item, /** @type {boolean} */ focused) {
     h(
       "button",
       { type: "button", class: "thumb", tabindex: tab, "aria-label": t("action.open", { name: item.id }), onclick: () => openDetail(item.id) },
-      h("img", { src: `/api/preview/${encodeURIComponent(item.id)}?t=${encodeURIComponent(token)}`, alt: "", loading: "lazy", decoding: "async" }),
+      // The photo with its edit drawn on, when the server can draw it; the address changes when the edit does.
+      h("img", { src: item.edit ? `/api/edited/${encodeURIComponent(item.id)}?t=${encodeURIComponent(token)}&v=${encodeURIComponent(item.edit)}` : `/api/preview/${encodeURIComponent(item.id)}?t=${encodeURIComponent(token)}`, alt: "", loading: "lazy", decoding: "async" }),
     ),
     h("div", { class: "meta" }, h("span", { class: "name" }, item.id), h("span", { class: `badge s-${item.state}` }, stateText(item.state))),
     noteList(item),

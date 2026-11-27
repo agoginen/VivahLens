@@ -37,7 +37,7 @@ function bestOfBurst(group: readonly Frame[]): Frame {
 /** Rejects blurry frames and keeps only the best frame of each near-duplicate group. Order is preserved. */
 export function cullBatch(items: readonly CullInput[], opts: CullOptions = {}): CullResult {
   const blurThreshold = opts.blurThreshold ?? 100;
-  const dupDistance = opts.duplicateDistance ?? 6;
+  const dupDistance = opts.duplicateDistance ?? 10;
 
   const scores: Record<string, number> = {};
   const rejected: CullResult["rejected"] = [];
