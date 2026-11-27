@@ -62,10 +62,9 @@ describe("cullBatch", () => {
   it("still keeps a clearly sharper burst frame when more of its picture is blown out", () => {
     const blown = frame({ noise: 110, seed: 1, lift: 40 });
     const clean = frame({ noise: 40, seed: 2 });
-    const r = cullBatch([
-      { id: "clean", image: clean },
-      { id: "blown", image: blown },
-    ]);
+    // The lift clips the bright end of `blown`, shifting its hash 4 bits from `clean`; set an explicit distance so this
+    // test stays meaningful even though the default is now 0 (disabled).
+    const r = cullBatch([{ id: "clean", image: clean }, { id: "blown", image: blown }], { duplicateDistance: 5 });
     expect(clippedShare(blown)).toBeGreaterThan(clippedShare(clean));
     expect(r.scores.clean! / r.scores.blown!).toBeLessThan(0.85);
     expect(r.kept).toEqual(["blown"]);

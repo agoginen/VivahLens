@@ -16,7 +16,12 @@ export interface CullResult {
 export interface CullOptions {
   /** Laplacian variance below this is rejected as blurry. */
   blurThreshold?: number;
-  /** Hamming distance at or below this groups frames as near-duplicates. */
+  /**
+   * Hamming distance at or below this groups frames as near-duplicates; only the sharpest of each group is kept.
+   * Defaults to 0 (disabled) because the 8×8 difference hash cannot reliably distinguish burst shots from two
+   * distinct photos of the same scene without timestamp information. Set to 5–10 when you know the input contains
+   * rapid-fire bursts and want them deduplicated.
+   */
   duplicateDistance?: number;
 }
 
@@ -37,7 +42,7 @@ function bestOfBurst(group: readonly Frame[]): Frame {
 /** Rejects blurry frames and keeps only the best frame of each near-duplicate group. Order is preserved. */
 export function cullBatch(items: readonly CullInput[], opts: CullOptions = {}): CullResult {
   const blurThreshold = opts.blurThreshold ?? 100;
-  const dupDistance = opts.duplicateDistance ?? 10;
+  const dupDistance = opts.duplicateDistance ?? 0;
 
   const scores: Record<string, number> = {};
   const rejected: CullResult["rejected"] = [];

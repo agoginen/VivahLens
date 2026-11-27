@@ -47,8 +47,8 @@ import {
   type StyleProfile,
   type VersionedPriceTable,
 } from "@vivahlens/core";
-import { DecodePool, defaultDecodeWorkers, fingerprintFile, loadPreview, scanFolder } from "@vivahlens/ingest";
-import { createPreviewRenderer, RenderAdapter } from "@vivahlens/render";
+import { DecodePool, defaultDecodeWorkers, fingerprintFile, loadPreview, loadRgba, scanFolder } from "@vivahlens/ingest";
+import { createPreviewRenderer, createThumbnailer, holdToLook, learnLook, LOOK_METHOD, matchLook, pictureOf, RenderAdapter, withMeasuredLook } from "@vivahlens/render";
 import { writeZip } from "@vivahlens/delivery";
 import { startReviewServer, startStudioServer, FieldError, type ReviewDeps, type ReviewServer, type StartRequest, type StudioWorkflow } from "@vivahlens/review";
 import {
@@ -73,7 +73,7 @@ import { scorePerceptually } from "./perceptualEval.js";
 import { activate as activateLicense, currentEntitlement, deactivate as deactivateLicense, LicenseStore } from "./licenseClient.js";
 import { APP_VERSION, openCommandLog } from "./logging.js";
 import { progressPrinter } from "./progress.js";
-import { buildGateway, providerNotice, type ProviderChoice } from "./providers.js";
+import { LOCAL_PROVIDER, buildGateway, providerNotice, type ProviderChoice } from "./providers.js";
 import { adapterNotice, loadRemoteConfig } from "./remoteConfigClient.js";
 import { SettingsStore } from "./settings.js";
 import { documentServer, installId, pinnedKeys, TrustState } from "./signedClient.js";
@@ -120,7 +120,8 @@ const USAGE = `vivah: AI editing automation (local-first)
                                                                     open the local review UI in your browser. With no --folder and --profile
                                                                     it opens a page where you choose the photos, the output folder and your
                                                                     style photos, start the edit, then review (default there: --adapter render,
-                                                                    and the offline demo model unless you pass --provider)
+                                                                    and --provider local, which measures your style photos on this
+                                                                    computer and sends nothing anywhere)
   vivah export --folder <dir> (--approve a.cr3,b.cr3 | --approve-all) [--export-dir <dir>]
                                                                     approve/export from the command line
   vivah deliver --folder <jpegs> --out <dir> [--preset web|social|album|print] [--zip]
@@ -144,7 +145,9 @@ const USAGE = `vivah: AI editing automation (local-first)
                                                                     check for a newer version (the answer is signed and verified; nothing is installed)
   vivah plugin lightroom                                            install the VivahLens plugin into Lightroom Classic
 
-Common: --provider mock|openai|anthropic|gemini|azure|ollama|openai-compatible  --model <id>  [--base-url <url>]
+Common: --provider local|openai|anthropic|gemini|azure|ollama|openai-compatible|mock  --model <id>  [--base-url <url>]
+        (local: no model and no key. learn measures the reference photos (black and white, toning, contrast, colour, crop
+        shape) and edit matches each photo to them, on this computer. mock is a fixed sample edit for trying things out)
         (azure: --base-url https://<resource>.openai.azure.com/openai/v1, --model is your deployment name)
         --prices <file>  --max-cost <usd>  --db <file>  --job <id>  --concurrency <n>  --workers <n>  --retry-failed
         --license <file>  --confirm-paid-tier (gemini only)
@@ -160,6 +163,9 @@ Keys are read from OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / AZURE_O
 Only downscaled JPEG previews (no EXIF/GPS) are sent to the LLM; originals are never modified or uploaded.`;
 
 const MAX_REFERENCES = 10;
+/** The size photos are measured at: a look is a matter of the whole picture, so a thumbnail is enough. */
+const MEASURE_EDGE = 256;
+const SMALL_PREVIEW = { maxEdge: MEASURE_EDGE, quality: 92 };
 /** Heuristic per-photo LLM usage for a ~2048px preview plus prompt, and a recipe reply (see research notes). */
 const EST_INPUT_TOKENS = 1600;
 const EST_OUTPUT_TOKENS = 400;
@@ -198,6 +204,7 @@ const OPTIONS = {
   prices: { type: "string" },
   "plugin-wait": { type: "string" },
   "retry-failed": { type: "boolean" },
+  "duplicate-distance": { type: "string" },
   offline: { type: "boolean" },
   restyle: { type: "boolean" },
   "no-open": { type: "boolean" },
@@ -315,7 +322,7 @@ const need = (value: string | undefined, flag: string): string => {
 function providerChoice(v: Args): ProviderChoice {
   return {
     provider: v.provider ?? "openai",
-    model: v.model ?? (v.provider === "mock" ? "mock" : need(v.model, "model")),
+    model: v.model ?? (v.provider === "mock" ? "mock" : v.provider === LOCAL_PROVIDER ? LOOK_METHOD : need(v.model, "model")),
     baseUrl: v["base-url"],
     maxCostUsd: v["max-cost"] ? Number(v["max-cost"]) : undefined,
     confirmedPaidTier: v["confirm-paid-tier"],
@@ -455,10 +462,14 @@ async function learn(v: Args, ctx: CliContext, opts: { reuse?: boolean } = {}): 
   const refs = (await scanFolder(refsDir)).slice(0, MAX_REFERENCES);
   if (refs.length === 0) throw new Error(`No supported images found in ${refsDir}`);
 
-  const { gateway, store } = await openGateway(v, ctx);
+  // Measuring needs no model and no key; a model's description is still held to what the photos measurably are.
+  const local = v.provider === LOCAL_PROVIDER;
+  const { gateway, store } = local ? { gateway: undefined, store: await openStore(v, ctx) } : await openGateway(v, ctx);
   try {
     const choice = providerChoice(v);
-    const source = learnedFrom(`${choice.provider}/${choice.model}`, await Promise.all(refs.map((a) => fingerprintFile(a.path))));
+    // The sample provider is a fixed edit that ignores the photos, so its styles are not measured and stay as they were.
+    const sample = choice.provider === "mock";
+    const source = learnedFrom(local ? `${LOCAL_PROVIDER}/${LOOK_METHOD}` : sample ? "mock/mock" : `${choice.provider}/${choice.model}+${LOOK_METHOD}`, await Promise.all(refs.map((a) => fingerprintFile(a.path))));
     if (opts.reuse) {
       const known = await latestStyle(slug(name), out, store);
       if (known?.learnedFrom === source) {
@@ -467,10 +478,19 @@ async function learn(v: Args, ctx: CliContext, opts: { reuse?: boolean } = {}): 
         return 0;
       }
     }
-    announceProvider(v, ctx);
-    info(ctx, `Sending ${refs.length} downscaled preview(s) to "${v.provider}" to learn the style…`);
-    const previews = await Promise.all(refs.map((a) => loadPreview(a)));
-    const profile = await saveLearned({ ...(await learnStyle(gateway, { id: slug(name), name, references: previews })), learnedFrom: source }, out, store);
+    const pictures = await Promise.all(refs.map((a) => loadRgba(a, { maxEdge: MEASURE_EDGE })));
+    let learned: StyleProfile;
+    if (!gateway) {
+      info(ctx, `Measuring ${refs.length} photo(s) on this computer to learn the style; nothing is sent anywhere.`);
+      learned = { id: slug(name), name, version: 1, ...learnLook(pictures) };
+    } else {
+      announceProvider(v, ctx);
+      info(ctx, `Sending ${refs.length} downscaled preview(s) to "${v.provider}" to learn the style…`);
+      const previews = await Promise.all(refs.map((a) => loadPreview(a)));
+      const described = await learnStyle(gateway, { id: slug(name), name, references: previews });
+      learned = sample ? described : withMeasuredLook(described, pictures);
+    }
+    const profile = await saveLearned({ ...learned, learnedFrom: source }, out, store);
     ctx.log(`Style "${name}" saved to ${out}${versionNote(profile)}\n  ${profile.summary}`);
     return 0;
   } finally {
@@ -528,10 +548,16 @@ async function edit(v: Args, ctx: CliContext, onProgress?: (event: { stage: stri
   try {
     const prices = await loadPrices(v, remote?.prices);
     // Offline needs no model and no key: files already edited are reused, the rest wait for a run with a connection.
-    const gateway = v.offline
-      ? new LlmGateway()
-      : buildGateway(providerChoice(v), ctx.env, { ...ledger(store, id), onCall: (call) => log.logger.info("llm.call", { jobId: id, ...call }), ...(prices && { prices: prices.table }) });
-    if (v.offline) info(ctx, "Offline: nothing is sent anywhere. Photos that need the model wait; run again without --offline to finish them.");
+    const local = v.provider === LOCAL_PROVIDER;
+    if (local && !profile.look) {
+      throw new Error(`Style "${profile.name}" was not learned by measuring photos, so photos cannot be matched to it on this computer. Learn it again with "vivah learn --refs <folder> --provider local", or choose a model with --provider.`);
+    }
+    const gateway =
+      v.offline || local
+        ? new LlmGateway()
+        : buildGateway(providerChoice(v), ctx.env, { ...ledger(store, id), onCall: (call) => log.logger.info("llm.call", { jobId: id, ...call }), ...(prices && { prices: prices.table }) });
+    if (local) info(ctx, "Nothing is sent anywhere: each photo is matched to the measured style on this computer.");
+    else if (v.offline) info(ctx, "Offline: nothing is sent anywhere. Photos that need the model wait; run again without --offline to finish them.");
     else {
       announceProvider(v, ctx);
       await announceCost(v, ctx, assets.length, prices);
@@ -546,7 +572,9 @@ async function edit(v: Args, ctx: CliContext, onProgress?: (event: { stage: stri
     log.logger.info("decoder", { mode: pool ? "workers" : "in-thread", workers: pool ? workers : 0 });
     const analysis = new AnalysisCache(pool && ((a) => pool!.analysis(a)));
     if (!(await adapter.detect())) throw new VivahError("ADAPTER_EDITOR_NOT_RUNNING", `${adapter.id} was not found on this machine`);
-    info(ctx, v.offline ? `Editing ${assets.length} photo(s) with "${adapter.id}" without the model.` : `Editing ${assets.length} photo(s) with "${adapter.id}". Previews (≤2048px, EXIF/GPS stripped) go to "${v.provider}"; originals stay put.`);
+    // A small copy of a photo, to measure: made by the decoders when there are any, so the main thread only reads a thumbnail.
+    const small = async (a: AssetRef) => pictureOf(await (pool ? pool.preview(a, SMALL_PREVIEW) : loadPreview(a, SMALL_PREVIEW)));
+    info(ctx, local || v.offline ? `Editing ${assets.length} photo(s) with "${adapter.id}" without a model.` : `Editing ${assets.length} photo(s) with "${adapter.id}". Previews (≤2048px, EXIF/GPS stripped) go to "${v.provider}"; originals stay put.`);
     const printProgress = progressPrinter((line) => info(ctx, line));
     const summary = await runJob(
       {
@@ -559,7 +587,17 @@ async function edit(v: Args, ctx: CliContext, onProgress?: (event: { stage: stri
         grayOf: (a) => analysis.gray(a),
         sceneOf: (a) => analysis.scene(a),
         describe: (a) => analysis.describe(a),
-        offline: v.offline,
+        offline: v.offline && !local,
+        ...(local
+          ? { propose: async ({ asset, profile: style }) => ({ version: "1.0", assetType: "photo", sourceStyleProfileId: style.id, adjustments: matchLook(await small(asset), style) }) }
+          : profile.look && {
+              // A model proposes, and what was measured for certain is kept: black and white stays so, and the crop shape is the style's.
+              propose: async ({ asset, profile: style, askModel }) => {
+                const [recipe, picture] = await Promise.all([askModel(), small(asset)]);
+                return { ...recipe, adjustments: holdToLook(recipe.adjustments, style.look, picture.width, picture.height) };
+              },
+            }),
+        ...(v["duplicate-distance"] !== undefined && { cull: { duplicateDistance: Number(v["duplicate-distance"]) } }),
         // Enough photos in flight to keep every decoder busy; one thread cannot use more than a few at once.
         concurrency: v.concurrency ? Number(v.concurrency) : Math.max(4, pool ? workers : 0),
         signal: ctx.signal,
@@ -658,6 +696,7 @@ async function openReviewSession(v: Args, ctx: CliContext): Promise<ReviewDeps> 
       ...(license.pausedBecause && { editingPaused: license.pausedBecause }),
       previewOf: (a) => loadPreview(a, { maxEdge: 1024 }),
       renderPreview: createPreviewRenderer({ maxEdge: 1024 }),
+      drawThumbnail: createThumbnailer(),
       exportSpec: delivery?.spec,
       afterExport: delivery?.afterExport,
       onProfileUpdated: async (p) => {
@@ -674,7 +713,9 @@ async function openReviewSession(v: Args, ctx: CliContext): Promise<ReviewDeps> 
 }
 
 /** The providers the page offers; one given on the command line is offered too, even if it needs more than a name and a key. */
-const PAGE_PROVIDERS = ["mock", "openai", "anthropic", "gemini", "ollama"];
+const PAGE_PROVIDERS = [LOCAL_PROVIDER, "openai", "anthropic", "gemini", "ollama"];
+/** Providers that are not a model to name: the measured style, and the sample edit. */
+const NO_MODEL_NAME = new Set([LOCAL_PROVIDER, "mock"]);
 /** The editor routes that export finished JPEGs, which is what the output folder is for. */
 const EXPORTING_ADAPTERS = new Set(["render", "rawtherapee", "darktable"]);
 
@@ -683,13 +724,14 @@ const EXPORTING_ADAPTERS = new Set(["render", "rawtherapee", "darktable"]);
  * folder of photos, and open the result for review. It is `learn`, `edit` and `review` run one after another with the choices
  * the person made on the page, so a license, a model price cap or a missing key stops it exactly as it would on the command line.
  * Without --adapter and --provider on the command line it uses the built-in renderer (which exports to the output folder) and
- * the offline demo model (which sends nothing anywhere): a cloud model is only used when the person picks one.
+ * the measured style (the reference photos are measured and each photo is matched to them, on this computer, with nothing
+ * sent anywhere): a cloud model is only used when the person picks one.
  */
 function studioWorkflow(v: Args, ctx: CliContext, given: ReadonlySet<string>): StudioWorkflow {
   const adapter = given.has("adapter") ? (v.adapter ?? "render") : "render";
-  const provider = given.has("provider") ? (v.provider ?? "mock") : "mock";
+  const provider = given.has("provider") ? (v.provider ?? LOCAL_PROVIDER) : LOCAL_PROVIDER;
   const outputUsed = EXPORTING_ADAPTERS.has(adapter);
-  const providers = [...new Set([...PAGE_PROVIDERS, provider])].map((id) => ({ id, needsModel: id !== "mock", local: id === "mock" || id === "ollama" }));
+  const providers = [...new Set([...PAGE_PROVIDERS, provider])].map((id) => ({ id, needsModel: !NO_MODEL_NAME.has(id), local: NO_MODEL_NAME.has(id) || id === "ollama" }));
   const countPhotos = async (folder: string): Promise<number> => (await scanFolder(folder).catch(() => [])).length;
 
   const checkFolder = async (field: "input" | "profile", folder: string): Promise<void> => {
@@ -739,7 +781,7 @@ function studioWorkflow(v: Args, ctx: CliContext, given: ReadonlySet<string>): S
         ...v,
         adapter,
         provider: chosen,
-        model: chosen === "mock" ? undefined : request.model?.trim(),
+        model: NO_MODEL_NAME.has(chosen) ? undefined : request.model?.trim(),
         folder: request.input,
         refs: request.profile,
         name,
